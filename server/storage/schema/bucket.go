@@ -58,6 +58,16 @@ var (
 	AllBuckets = []backend.Bucket{Key, Meta, Lease, Alarm, Cluster, Members, MembersRemoved, Auth, AuthUsers, AuthRoles}
 )
 
+// Register all buckets with the backend so the Pebble engine (a flat keyspace
+// that does not persist bucket names) can recover a bucket's name from its
+// 1-byte ID prefix when computing a whole-DB hash. No-op for bbolt.
+func init() {
+	for _, b := range AllBuckets {
+		backend.RegisterBucket(b)
+	}
+	backend.RegisterBucket(Test)
+}
+
 type bucket struct {
 	id              backend.BucketID
 	name            []byte
