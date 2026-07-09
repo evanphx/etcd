@@ -15,6 +15,7 @@
 package snapshot
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -88,6 +89,33 @@ type v3Manager struct {
 
 	skipHashCheck   bool
 	initialMmapSize uint64
+
+	// engine is the storage engine of the snapshot, auto-detected from its
+	// format (a tar of a Pebble checkpoint vs a single bbolt file).
+	engine backend.Engine
+}
+
+// detectSnapshotEngine inspects a snapshot file and returns its storage engine.
+// A Pebble snapshot is a tar whose first entry is the Pebble marker file; any
+// other content is treated as a legacy bbolt snapshot.
+func detectSnapshotEngine(path string) backend.Engine {
+	f, err := os.Open(path)
+	if err != nil {
+		return backend.EngineBBolt
+	}
+	defer f.Close()
+	tr := tar.NewReader(f)
+	hdr, err := tr.Next()
+	if err == nil && hdr.Name == backend.PebbleSnapshotVersionFile {
+		return backend.EnginePebble
+	}
+	return backend.EngineBBolt
+}
+
+// openBackend opens the restored backend with the detected engine.
+func (s *v3Manager) openBackend(opts ...backend.BackendConfigOption) backend.Backend {
+	opts = append(opts, backend.WithEngine(s.engine))
+	return backend.NewDefaultBackend(s.lg, s.outDbPath(), opts...)
 }
 
 // hasChecksum returns "true" if the file size "n"
@@ -118,6 +146,10 @@ type Status struct {
 func (s *v3Manager) Status(dbPath string) (ds Status, err error) {
 	if _, err = os.Stat(dbPath); err != nil {
 		return ds, err
+	}
+
+	if detectSnapshotEngine(dbPath) == backend.EnginePebble {
+		return s.statusPebble(dbPath)
 	}
 
 	db, err := bolt.Open(dbPath, 0o400, &bolt.Options{ReadOnly: true})
@@ -197,6 +229,65 @@ func (s *v3Manager) Status(dbPath string) (ds Status, err error) {
 
 	ds.TotalKey = len(seenKeys)
 	ds.Hash = h.Sum32()
+	return ds, nil
+}
+
+// statusPebble computes snapshot status for a Pebble snapshot (a tar of a
+// checkpoint) by extracting it and reading through the Pebble backend.
+func (s *v3Manager) statusPebble(dbPath string) (ds Status, err error) {
+	tmp, err := os.MkdirTemp("", "etcdutl-pebble-status-")
+	if err != nil {
+		return ds, err
+	}
+	defer os.RemoveAll(tmp)
+
+	f, err := os.Open(dbPath)
+	if err != nil {
+		return ds, err
+	}
+	ckptDir, uerr := backend.UntarPebbleSnapshot(f, tmp)
+	f.Close()
+	if uerr != nil {
+		return ds, uerr
+	}
+
+	be := backend.NewDefaultBackend(s.lg, ckptDir, backend.WithEngine(backend.EnginePebble))
+	defer be.Close()
+
+	rtx := be.ReadTx()
+	rtx.RLock()
+	if v := schema.UnsafeReadStorageVersion(rtx); v != nil {
+		ds.Version = v.String()
+	}
+	seenKeys := make(map[string]struct{})
+	err = rtx.UnsafeForEach(schema.Key, func(k, v []byte) error {
+		rev, e := bytesToRev(k)
+		if e != nil {
+			return fmt.Errorf("cannot parse revision key: %q err: %w", k, e)
+		}
+		ds.Revision = rev.Main
+		var kv mvccpb.KeyValue
+		if e := proto.Unmarshal(v, &kv); e != nil {
+			return fmt.Errorf("cannot unmarshal value, key: %q err: %w", k, e)
+		}
+		if !mvcc.IsTombstone(k) {
+			seenKeys[string(kv.Key)] = struct{}{}
+		} else {
+			delete(seenKeys, string(kv.Key))
+		}
+		return nil
+	})
+	rtx.RUnlock()
+	if err != nil {
+		return ds, err
+	}
+
+	ds.TotalKey = len(seenKeys)
+	ds.TotalSize = be.Size()
+	ds.Hash, err = be.Hash(nil)
+	if err != nil {
+		return ds, err
+	}
 	return ds, nil
 }
 
@@ -302,6 +393,7 @@ func (s *v3Manager) Restore(cfg RestoreConfig) error {
 	s.snapDir = filepath.Join(dataDir, "member", "snap")
 	s.skipHashCheck = cfg.SkipHashCheck
 	s.initialMmapSize = cfg.InitialMmapSize
+	s.engine = detectSnapshotEngine(s.srcDbPath)
 
 	s.lg.Info(
 		"restoring snapshot",
@@ -358,7 +450,7 @@ func (s *v3Manager) saveDB() error {
 		return err
 	}
 
-	be := backend.NewDefaultBackend(s.lg, s.outDbPath(), backend.WithMmapSize(s.initialMmapSize))
+	be := s.openBackend(backend.WithMmapSize(s.initialMmapSize))
 	defer be.Close()
 
 	err = schema.NewMembershipBackend(s.lg, be).TrimMembershipFromBackend()
@@ -372,7 +464,7 @@ func (s *v3Manager) saveDB() error {
 // modifyLatestRevision can increase the latest revision by the given amount and sets the scheduled compaction
 // to that revision so that the server will consider this revision compacted.
 func (s *v3Manager) modifyLatestRevision(bumpAmount uint64) error {
-	be := backend.NewDefaultBackend(s.lg, s.outDbPath())
+	be := s.openBackend()
 	defer func() {
 		be.ForceCommit()
 		be.Close()
@@ -501,7 +593,46 @@ func (s *v3Manager) copyAndVerifyDB() error {
 
 	// db hash is OK, can now modify DB so it can be part of a new cluster
 
+	// For pebble the verified artifact is a tar of a checkpoint directory;
+	// expand it into the store directory expected at outDbPath.
+	if s.engine == backend.EnginePebble {
+		return s.expandPebbleSnapshot()
+	}
+
 	return nil
+}
+
+// expandPebbleSnapshot converts the verified Pebble snapshot tar sitting at
+// outDbPath into the Pebble store directory expected there.
+func (s *v3Manager) expandPebbleSnapshot() error {
+	outDbPath := s.outDbPath()
+	tarPath := outDbPath + ".tar"
+	if err := os.Rename(outDbPath, tarPath); err != nil {
+		return err
+	}
+	f, err := os.Open(tarPath)
+	if err != nil {
+		return err
+	}
+	staging := outDbPath + ".stage"
+	if err := os.RemoveAll(staging); err != nil {
+		f.Close()
+		return err
+	}
+	if err := os.MkdirAll(staging, 0o700); err != nil {
+		f.Close()
+		return err
+	}
+	ckptDir, err := backend.UntarPebbleSnapshot(f, staging)
+	f.Close()
+	if err != nil {
+		return err
+	}
+	if err := os.Rename(ckptDir, outDbPath); err != nil {
+		return err
+	}
+	os.RemoveAll(staging)
+	return os.Remove(tarPath)
 }
 
 // saveWALAndSnap creates a WAL for the initial cluster
@@ -513,7 +644,7 @@ func (s *v3Manager) saveWALAndSnap() (*raftpb.HardState, error) {
 	}
 
 	// add members again to persist them to the backend we create.
-	be := backend.NewDefaultBackend(s.lg, s.outDbPath(), backend.WithMmapSize(s.initialMmapSize))
+	be := s.openBackend(backend.WithMmapSize(s.initialMmapSize))
 	defer be.Close()
 	s.cl.SetBackend(schema.NewMembershipBackend(s.lg, be))
 	for _, m := range s.cl.Members() {
@@ -592,7 +723,7 @@ func (s *v3Manager) saveWALAndSnap() (*raftpb.HardState, error) {
 }
 
 func (s *v3Manager) updateCIndex(commit uint64, term uint64) error {
-	be := backend.NewDefaultBackend(s.lg, s.outDbPath(), backend.WithMmapSize(s.initialMmapSize))
+	be := s.openBackend(backend.WithMmapSize(s.initialMmapSize))
 	defer be.Close()
 
 	cindex.UpdateConsistentIndexForce(be.BatchTx(), commit, term)

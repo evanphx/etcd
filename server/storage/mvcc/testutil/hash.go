@@ -21,12 +21,14 @@ import (
 	"os"
 	"testing"
 
+	"github.com/cockroachdb/pebble/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
 
 	"go.etcd.io/bbolt"
 	"go.etcd.io/etcd/api/v3/mvccpb"
+	"go.etcd.io/etcd/server/v3/storage/schema"
 )
 
 const (
@@ -147,4 +149,55 @@ func CorruptBBolt(fpath string) error {
 		}
 		return nil
 	})
+}
+
+// CorruptPebble is the Pebble-engine counterpart of CorruptBBolt: it mutates
+// every value in the Key bucket of the Pebble store at dir, to exercise
+// corruption detection. dir must be a Pebble store directory that is not
+// currently open.
+func CorruptPebble(dir string) error {
+	db, err := pebble.Open(dir, &pebble.Options{})
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	// The Key bucket is encoded under the single-byte prefix equal to its ID.
+	prefix := byte(schema.Key.ID())
+	iter, err := db.NewIter(&pebble.IterOptions{
+		LowerBound: []byte{prefix},
+		UpperBound: []byte{prefix + 1},
+	})
+	if err != nil {
+		return err
+	}
+
+	type mutation struct{ k, v []byte }
+	var muts []mutation
+	for ok := iter.First(); ok; ok = iter.Next() {
+		var kv mvccpb.KeyValue
+		if uerr := proto.Unmarshal(iter.Value(), &kv); uerr != nil {
+			iter.Close()
+			return uerr
+		}
+		kv.Key[0]++
+		kv.Value[0]++
+		nv, merr := proto.Marshal(&kv)
+		if merr != nil {
+			iter.Close()
+			return merr
+		}
+		muts = append(muts, mutation{append([]byte{}, iter.Key()...), nv})
+	}
+	if cerr := iter.Close(); cerr != nil {
+		return cerr
+	}
+
+	b := db.NewBatch()
+	for _, m := range muts {
+		if perr := b.Set(m.k, m.v, nil); perr != nil {
+			return perr
+		}
+	}
+	return b.Commit(pebble.Sync)
 }
