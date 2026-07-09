@@ -59,6 +59,7 @@ const (
 	ClusterStateFlagExisting = "existing"
 
 	DefaultName                        = "default"
+	DefaultBackendEngine               = "bbolt"
 	DefaultMaxSnapshots                = 5
 	DefaultMaxWALs                     = 5
 	DefaultMaxTxnOps                   = uint(128)
@@ -228,9 +229,19 @@ type Config struct {
 	BackendBatchLimit int `json:"backend-batch-limit"`
 	// BackendFreelistType specifies the type of freelist that boltdb backend uses (array and map are supported types).
 	BackendFreelistType string `json:"backend-bbolt-freelist-type"`
-	QuotaBackendBytes   int64  `json:"quota-backend-bytes"`
-	MaxTxnOps           uint   `json:"max-txn-ops"`
-	MaxRequestBytes     uint   `json:"max-request-bytes"`
+	// BackendEngine selects the storage engine that backs the state machine.
+	// Supported values: "bbolt" (default) and "pebble".
+	BackendEngine string `json:"backend-engine"`
+	// Pebble-engine memory tuning (used only when backend-engine=pebble). Zero
+	// leaves Pebble's default in place. See the memory-tier tuning guidance.
+	PebbleCacheBytes                  int64 `json:"pebble-cache-bytes"`
+	PebbleMemTableBytes               int64 `json:"pebble-memtable-bytes"`
+	PebbleMemTableStopWritesThreshold int   `json:"pebble-memtable-count"`
+	PebbleMaxOpenFiles                int   `json:"pebble-max-open-files"`
+	PebbleMaxConcurrentCompactions    int   `json:"pebble-max-concurrent-compactions"`
+	QuotaBackendBytes                 int64 `json:"quota-backend-bytes"`
+	MaxTxnOps                         uint  `json:"max-txn-ops"`
+	MaxRequestBytes                   uint  `json:"max-request-bytes"`
 
 	// MaxConcurrentStreams specifies the maximum number of concurrent
 	// streams that each client can open at a time.
@@ -512,6 +523,8 @@ func NewConfig() *Config {
 
 		Name: DefaultName,
 
+		BackendEngine: DefaultBackendEngine,
+
 		SnapshotCount:          etcdserver.DefaultSnapshotCount,
 		SnapshotCatchUpEntries: etcdserver.DefaultSnapshotCatchUpEntries,
 
@@ -631,6 +644,12 @@ func (cfg *Config) AddFlags(fs *flag.FlagSet) {
 	fs.BoolVar(&cfg.InitialElectionTickAdvance, "initial-election-tick-advance", cfg.InitialElectionTickAdvance, "Whether to fast-forward initial election ticks on boot for faster election.")
 	fs.Int64Var(&cfg.QuotaBackendBytes, "quota-backend-bytes", cfg.QuotaBackendBytes, "Sets the maximum size (in bytes) that the etcd backend database may consume. Exceeding this triggers an alarm and puts etcd in read-only mode. Set to 0 to use the default 2GiB limit.")
 	fs.StringVar(&cfg.BackendFreelistType, "backend-bbolt-freelist-type", cfg.BackendFreelistType, "BackendFreelistType specifies the type of freelist that boltdb backend uses(array and map are supported types)")
+	fs.StringVar(&cfg.BackendEngine, "backend-engine", cfg.BackendEngine, "BackendEngine selects the storage engine that backs the state machine (bbolt or pebble). Defaults to bbolt.")
+	fs.Int64Var(&cfg.PebbleCacheBytes, "pebble-cache-bytes", cfg.PebbleCacheBytes, "Pebble engine: block cache size in bytes (0 = Pebble default).")
+	fs.Int64Var(&cfg.PebbleMemTableBytes, "pebble-memtable-bytes", cfg.PebbleMemTableBytes, "Pebble engine: per-memtable size in bytes (0 = Pebble default).")
+	fs.IntVar(&cfg.PebbleMemTableStopWritesThreshold, "pebble-memtable-count", cfg.PebbleMemTableStopWritesThreshold, "Pebble engine: max queued memtables before writes stall (0 = Pebble default).")
+	fs.IntVar(&cfg.PebbleMaxOpenFiles, "pebble-max-open-files", cfg.PebbleMaxOpenFiles, "Pebble engine: max open sstable files / table-cache size (0 = Pebble default).")
+	fs.IntVar(&cfg.PebbleMaxConcurrentCompactions, "pebble-max-concurrent-compactions", cfg.PebbleMaxConcurrentCompactions, "Pebble engine: max concurrent background compactions (0 = Pebble default).")
 	fs.DurationVar(&cfg.BackendBatchInterval, "backend-batch-interval", cfg.BackendBatchInterval, "BackendBatchInterval is the maximum time before commit the backend transaction.")
 	fs.IntVar(&cfg.BackendBatchLimit, "backend-batch-limit", cfg.BackendBatchLimit, "BackendBatchLimit is the maximum operations before commit the backend transaction.")
 	fs.UintVar(&cfg.MaxTxnOps, "max-txn-ops", cfg.MaxTxnOps, "Maximum number of operations permitted in a transaction.")
@@ -941,6 +960,9 @@ func updateMinMaxVersions(info *transport.TLSInfo, min, max string) {
 // Validate ensures that '*embed.Config' fields are properly configured.
 func (cfg *Config) Validate() error {
 	if err := cfg.setupLogging(); err != nil {
+		return err
+	}
+	if err := cfg.validateBackendEngine(); err != nil {
 		return err
 	}
 	if err := checkBindURLs(cfg.ListenPeerUrls); err != nil {
@@ -1399,4 +1421,14 @@ func parseBackendFreelistType(freelistType string) bolt.FreelistType {
 	}
 
 	return bolt.FreelistMapType
+}
+
+// validateBackendEngine checks the --backend-engine value.
+func (cfg *Config) validateBackendEngine() error {
+	switch cfg.BackendEngine {
+	case "", DefaultBackendEngine, "pebble":
+		return nil
+	default:
+		return fmt.Errorf("unknown backend-engine %q (supported: bbolt, pebble)", cfg.BackendEngine)
+	}
 }

@@ -944,3 +944,27 @@ func TestFastLeaseKeepAliveValidate(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateBackendEngine(t *testing.T) {
+	tests := []struct {
+		engine    string
+		expectErr bool
+	}{
+		{engine: "", expectErr: false},
+		{engine: "bbolt", expectErr: false},
+		{engine: "pebble", expectErr: false},
+		{engine: "rocksdb", expectErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.engine, func(t *testing.T) {
+			cfg := NewConfig()
+			cfg.BackendEngine = tc.engine
+			err := cfg.Validate()
+			if tc.expectErr {
+				require.Errorf(t, err, "engine %q should be rejected", tc.engine)
+			} else {
+				require.NoErrorf(t, err, "engine %q should be accepted", tc.engine)
+			}
+		})
+	}
+}

@@ -130,7 +130,20 @@ type backend struct {
 	lg *zap.Logger
 }
 
+// Engine selects the storage engine that backs the etcd state machine.
+type Engine string
+
+const (
+	// EngineBBolt is the default bbolt (B+tree, mmap) storage engine.
+	EngineBBolt Engine = "bbolt"
+	// EnginePebble is the Pebble (LSM) storage engine, opt-in for
+	// memory-constrained deployments. See the pebble_backend.go implementation.
+	EnginePebble Engine = "pebble"
+)
+
 type BackendConfig struct {
+	// Engine selects the storage engine (bbolt or pebble). Empty means bbolt.
+	Engine Engine
 	// Path is the file path to the backend file.
 	Path string
 	// BatchInterval is the maximum time before flushing the BatchTx.
@@ -153,6 +166,24 @@ type BackendConfig struct {
 
 	// Hooks are getting executed during lifecycle of Backend's transactions.
 	Hooks Hooks
+
+	// Pebble-engine tuning. Each is applied only when non-zero; zero means use
+	// Pebble's built-in default. These are the primary memory-profile knobs for
+	// the pebble engine (see the memory-tier tuning guidance).
+	//
+	// PebbleCacheBytes caps the shared block cache (bytes). With a cgo build
+	// this memory lives off the Go heap.
+	PebbleCacheBytes int64
+	// PebbleMemTableBytes sets the size of each memtable arena (bytes).
+	PebbleMemTableBytes int64
+	// PebbleMemTableStopWritesThreshold bounds the number of queued memtables
+	// (memtable memory ~= PebbleMemTableBytes * threshold).
+	PebbleMemTableStopWritesThreshold int
+	// PebbleMaxOpenFiles bounds open sstable file descriptors / table-cache size.
+	PebbleMaxOpenFiles int
+	// PebbleMaxConcurrentCompactions bounds concurrent background compactions
+	// (each holds iterator/block buffers).
+	PebbleMaxConcurrentCompactions int
 }
 
 type BackendConfigOption func(*BackendConfig)
@@ -167,12 +198,37 @@ func DefaultBackendConfig(lg *zap.Logger) BackendConfig {
 }
 
 func New(bcfg BackendConfig) Backend {
-	return newBackend(bcfg)
+	return open(bcfg)
+}
+
+// open dispatches to the configured storage engine. bbolt is the default;
+// pebble is opt-in. Both satisfy the Backend interface.
+func open(bcfg BackendConfig) Backend {
+	if bcfg.Logger == nil {
+		bcfg.Logger = zap.NewNop()
+	}
+	switch bcfg.Engine {
+	case EnginePebble:
+		return newPebbleBackend(bcfg)
+	case EngineBBolt, "":
+		return newBackend(bcfg)
+	default:
+		bcfg.Logger.Panic("unknown backend engine", zap.String("engine", string(bcfg.Engine)))
+		return nil
+	}
 }
 
 func WithMmapSize(size uint64) BackendConfigOption {
 	return func(bcfg *BackendConfig) {
 		bcfg.MmapSize = size
+	}
+}
+
+// WithEngine selects the storage engine for a backend opened via
+// NewDefaultBackend (used by offline tooling such as etcdutl).
+func WithEngine(engine Engine) BackendConfigOption {
+	return func(bcfg *BackendConfig) {
+		bcfg.Engine = engine
 	}
 }
 
@@ -189,7 +245,7 @@ func NewDefaultBackend(lg *zap.Logger, path string, opts ...BackendConfigOption)
 		opt(&bcfg)
 	}
 
-	return newBackend(bcfg)
+	return open(bcfg)
 }
 
 func newBackend(bcfg BackendConfig) *backend {

@@ -84,6 +84,18 @@ Member:
     Sets the maximum size (in bytes) that the etcd backend database may consume. Exceeding this triggers an alarm and puts etcd in read-only mode. Set to 0 to use the default 2GiB limit.
   --backend-bbolt-freelist-type 'map'
     BackendFreelistType specifies the type of freelist that boltdb backend uses(array and map are supported types).
+  --backend-engine 'bbolt'
+    BackendEngine selects the storage engine that backs the state machine (bbolt or pebble). Defaults to bbolt.
+  --pebble-cache-bytes '0'
+    Pebble engine: block cache size in bytes (0 = Pebble default).
+  --pebble-memtable-bytes '0'
+    Pebble engine: per-memtable size in bytes (0 = Pebble default).
+  --pebble-memtable-count '0'
+    Pebble engine: max queued memtables before writes stall (0 = Pebble default).
+  --pebble-max-open-files '0'
+    Pebble engine: max open sstable files / table-cache size (0 = Pebble default).
+  --pebble-max-concurrent-compactions '0'
+    Pebble engine: max concurrent background compactions (0 = Pebble default).
   --backend-batch-interval ''
     BackendBatchInterval is the maximum time before commit the backend transaction.
   --backend-batch-limit '0'

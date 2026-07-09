@@ -71,6 +71,18 @@ type ServerConfig struct {
 	// BackendFreelistType is the type of the backend boltdb freelist.
 	BackendFreelistType bolt.FreelistType
 
+	// BackendEngine selects the storage engine ("bbolt" or "pebble").
+	// Empty defaults to bbolt.
+	BackendEngine string
+
+	// Pebble-engine tuning knobs (applied only when BackendEngine == "pebble").
+	// Zero means use Pebble's default.
+	PebbleCacheBytes                  int64
+	PebbleMemTableBytes               int64
+	PebbleMemTableStopWritesThreshold int
+	PebbleMaxOpenFiles                int
+	PebbleMaxConcurrentCompactions    int
+
 	InitialPeerURLsMap  types.URLsMap
 	InitialClusterToken string
 	NewCluster          bool
