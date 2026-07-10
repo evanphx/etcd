@@ -36,16 +36,14 @@ var SizeCompactionThreshold = 0.9
 // It is a var so tests can shorten it.
 var SizeCheckInterval = 500 * time.Millisecond
 
-// SizeCompactionSettleDelay is how long to wait after scheduling a compaction
-// (whose revision deletions are applied asynchronously) before defragging to
-// reclaim the freed space.
-var SizeCompactionSettleDelay = 300 * time.Millisecond
-
 // Size is a reactive compactor: when the backend size reaches
 // SizeCompactionThreshold of the quota, it compacts (keeping the last
-// `retention` revisions) and defrags to reclaim the space, as a safety net
-// against the NOSPACE alarm. Unlike periodic/revision compaction it is driven by
-// actual size, not a schedule.
+// `retention` revisions) as a safety net against the NOSPACE alarm. Unlike
+// periodic/revision compaction it is driven by actual size, not a schedule.
+//
+// It only compacts; it does not defrag. On pebble the freed space is reclaimed
+// online by background compaction; on bbolt the file does not shrink without a
+// (manual) defrag, so this mode does not by itself keep bbolt under quota.
 type Size struct {
 	lg *zap.Logger
 
@@ -56,7 +54,6 @@ type Size struct {
 	rg RevGetter
 	c  Compactable
 	sg SizeGetter
-	df Defragger
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -65,7 +62,7 @@ type Size struct {
 	paused bool
 }
 
-func newSize(lg *zap.Logger, clock clockwork.Clock, retention int64, rg RevGetter, c Compactable, sg SizeGetter, df Defragger, maxBytes int64) *Size {
+func newSize(lg *zap.Logger, clock clockwork.Clock, retention int64, rg RevGetter, c Compactable, sg SizeGetter, maxBytes int64) *Size {
 	sc := &Size{
 		lg:        lg,
 		clock:     clock,
@@ -74,7 +71,6 @@ func newSize(lg *zap.Logger, clock clockwork.Clock, retention int64, rg RevGette
 		rg:        rg,
 		c:         c,
 		sg:        sg,
-		df:        df,
 	}
 	sc.ctx, sc.cancel = context.WithCancel(context.Background())
 	return sc
@@ -121,28 +117,10 @@ func (sc *Size) Run() {
 				continue
 			}
 			prev = rev
-
-			// The compaction deletes old revisions asynchronously; wait briefly
-			// for that to progress, then reclaim so the reported size actually
-			// drops. For pebble this defrag is an online compaction; for bbolt it
-			// is a stop-the-world file rewrite (writes pause during it).
-			select {
-			case <-sc.ctx.Done():
-				return
-			case <-sc.clock.After(SizeCompactionSettleDelay):
-			}
-			// df is nil for engines that reclaim online (pebble); for bbolt it
-			// defrags to actually shrink the file (stop-the-world).
-			if sc.df != nil {
-				if derr := sc.df.Defrag(); derr != nil {
-					sc.lg.Warn("size compaction: defrag failed", zap.Error(derr))
-				}
-			}
 			sc.lg.Info(
 				"completed auto size compaction",
 				zap.Int64("revision", rev),
-				zap.Int64("size-before-bytes", size),
-				zap.Int64("size-after-bytes", sc.sg.Size()),
+				zap.Int64("size-bytes", size),
 				zap.Duration("took", time.Since(now)),
 			)
 		}

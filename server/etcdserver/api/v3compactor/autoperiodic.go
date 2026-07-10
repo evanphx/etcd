@@ -68,7 +68,6 @@ type AutoPeriodic struct {
 	rg RevGetter
 	c  Compactable
 	sg SizeGetter
-	df Defragger
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -77,7 +76,7 @@ type AutoPeriodic struct {
 	paused bool
 }
 
-func newAutoPeriodic(lg *zap.Logger, clock clockwork.Clock, retention int64, rg RevGetter, c Compactable, sg SizeGetter, df Defragger, maxBytes int64) *AutoPeriodic {
+func newAutoPeriodic(lg *zap.Logger, clock clockwork.Clock, retention int64, rg RevGetter, c Compactable, sg SizeGetter, maxBytes int64) *AutoPeriodic {
 	ac := &AutoPeriodic{
 		lg:        lg,
 		clock:     clock,
@@ -86,7 +85,6 @@ func newAutoPeriodic(lg *zap.Logger, clock clockwork.Clock, retention int64, rg 
 		rg:        rg,
 		c:         c,
 		sg:        sg,
-		df:        df,
 	}
 	ac.ctx, ac.cancel = context.WithCancel(context.Background())
 	return ac
@@ -171,18 +169,6 @@ func (ac *AutoPeriodic) Run() {
 			}
 			prev = rev
 
-			// Let the async revision deletions progress, then reclaim (defrag for
-			// bbolt; pebble's df is nil and reclaims online).
-			select {
-			case <-ac.ctx.Done():
-				return
-			case <-ac.clock.After(SizeCompactionSettleDelay):
-			}
-			if ac.df != nil {
-				if derr := ac.df.Defrag(); derr != nil {
-					ac.lg.Warn("auto-periodic compaction: defrag failed", zap.Error(derr))
-				}
-			}
 			cooldownUntil = ac.clock.Now().Add(AutoPeriodicCooldown)
 			ac.lg.Info(
 				"completed auto-periodic compaction",

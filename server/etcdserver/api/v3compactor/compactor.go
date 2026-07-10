@@ -58,21 +58,22 @@ type RevGetter interface {
 	Rev() int64
 }
 
-// SizeGetter reports the current backend size (used by the size compactor).
+// SizeGetter reports the current backend size (used by the size and
+// auto-periodic compactors).
 type SizeGetter interface {
 	Size() int64
 }
 
-// Defragger reclaims backend space (used by the size compactor to make the
-// compacted revisions' space actually available before the quota is hit).
-type Defragger interface {
-	Defrag() error
-}
-
 // New returns a new Compactor based on given "mode".
 //
-// sg/df/maxBytes are only consulted by ModeSize; the periodic and revision
-// compactors ignore them.
+// sg/maxBytes are only consulted by the size and auto-periodic modes; the
+// periodic and revision compactors ignore them.
+//
+// Like the periodic and revision modes, the size and auto-periodic modes only
+// compact; they never defrag. Reclaiming physical space is left to the engine
+// (online for pebble) or to an operator (manual defrag for bbolt), matching
+// etcd's long-standing separation of compaction (routine) from defrag
+// (disruptive, operator-initiated).
 func New(
 	lg *zap.Logger,
 	mode string,
@@ -80,7 +81,6 @@ func New(
 	rg RevGetter,
 	c Compactable,
 	sg SizeGetter,
-	df Defragger,
 	maxBytes int64,
 ) (Compactor, error) {
 	if lg == nil {
@@ -92,9 +92,9 @@ func New(
 	case ModeRevision:
 		return newRevision(lg, clockwork.NewRealClock(), int64(retention), rg, c), nil
 	case ModeSize:
-		return newSize(lg, clockwork.NewRealClock(), int64(retention), rg, c, sg, df, maxBytes), nil
+		return newSize(lg, clockwork.NewRealClock(), int64(retention), rg, c, sg, maxBytes), nil
 	case ModeAutoPeriodic:
-		return newAutoPeriodic(lg, clockwork.NewRealClock(), int64(retention), rg, c, sg, df, maxBytes), nil
+		return newAutoPeriodic(lg, clockwork.NewRealClock(), int64(retention), rg, c, sg, maxBytes), nil
 	default:
 		return nil, fmt.Errorf("unsupported compaction mode %s", mode)
 	}

@@ -41,7 +41,6 @@ func TestSizeCompactionMode(t *testing.T) {
 
 	// Make the reactive compactor fast for the test.
 	defer restore(&v3compactor.SizeCheckInterval, 50*time.Millisecond)()
-	defer restore(&v3compactor.SizeCompactionSettleDelay, 300*time.Millisecond)()
 	defer restore(&v3compactor.SizeCompactionThreshold, 0.7)()
 
 	const (
@@ -117,20 +116,12 @@ func TestSizeCompactionMode(t *testing.T) {
 				t.Logf("  RESULT: survived all %d writes (no NOSPACE)", writeTotal)
 			}
 
-			switch engine {
-			case "bbolt":
-				// Robust: the stop-the-world defrag pauses writes and wins the
-				// reclaim race, so the quota is never breached.
-				require.NoError(t, tripErr, "bbolt size mode should prevent the NOSPACE alarm")
-				require.Equal(t, writeTotal, done)
-			default:
-				// pebble reclaims online (no write pause), so under sustained
-				// inflow its physical DiskSpaceUsage can race the quota; survival
-				// is load-dependent. We characterize rather than assert it.
-				if tripErr != nil {
-					t.Logf("  (pebble tripped: online reclaim lagged the inflow at this rate)")
-				}
-			}
+			// Compaction-only (no defrag) reactive-at-90% is a weak defense:
+			// bbolt's file does not shrink without a manual defrag, and pebble's
+			// online reclaim can't catch up from 90%. We characterize the behavior
+			// rather than assert survival (the proactive auto-periodic mode is the
+			// effective one; see TestAutoPeriodicCompactionMode).
+			require.Positive(t, done, "server should accept writes before any alarm")
 		})
 	}
 }

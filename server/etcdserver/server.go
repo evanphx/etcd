@@ -383,14 +383,10 @@ func NewServer(cfg config.ServerConfig) (srv *EtcdServer, err error) {
 		if quotaBytes <= 0 {
 			quotaBytes = int64(2 * 1024 * 1024 * 1024)
 		}
-		// The size compactor defrags to reclaim space for bbolt (whose file does
-		// not shrink on compaction); pebble reclaims online via background
-		// compaction, and a forced defrag would only spike its DiskSpaceUsage.
-		var defragger v3compactor.Defragger
-		if backend.Engine(cfg.BackendEngine) != backend.EnginePebble {
-			defragger = srv.be
-		}
-		srv.compactor, err = v3compactor.New(cfg.Logger, cfg.AutoCompactionMode, num, srv.kv, srv, srv.be, defragger, quotaBytes)
+		// The size/auto-periodic modes only compact; they never defrag (matching
+		// periodic/revision). pebble reclaims the freed space online; bbolt's file
+		// is reclaimed only by a (manual) defrag.
+		srv.compactor, err = v3compactor.New(cfg.Logger, cfg.AutoCompactionMode, num, srv.kv, srv, srv.be, quotaBytes)
 		if err != nil {
 			return nil, err
 		}

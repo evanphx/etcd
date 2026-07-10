@@ -27,14 +27,19 @@ import (
 
 // TestAutoPeriodicCompactionMode drives ~4x the quota through a single key with
 // the workload-adaptive auto-periodic mode, on each engine, at a realistic write
-// rate. The proactive predictive compaction steers the size to stay well below
-// quota, so both engines survive with headroom -- more robustly than the
-// reactive size mode, which fires only once the quota is nearly reached.
+// rate. The mode only compacts (never defrags, matching stock etcd), yet both
+// engines stay under quota:
 //
-// (Under an unthrottled, saturating writer pebble still trips: no compaction
-// timing beats a writer that outpaces online reclaim; there, the NOSPACE alarm
-// is the intended backpressure. bbolt only "survives" saturation by pausing
-// writes during its stop-the-world defrag, which is itself backpressure.)
+//   - pebble reclaims the freed space online via background compaction, so its
+//     reported size drops after each compaction.
+//   - bbolt's file does not shrink, but compaction frees pages to the freelist
+//     that subsequent writes reuse, so under continuous write+compaction the
+//     file stabilizes at the working-set high-water mark instead of growing to
+//     the quota. (A defrag would additionally shrink the file to the live-data
+//     size, but is not needed to stay under quota.)
+//
+// This is why not auto-defragging is fine: both engines are defended by their
+// own reclaim, with no stop-the-world pauses.
 func TestAutoPeriodicCompactionMode(t *testing.T) {
 	if testing.Short() {
 		t.Skip("writes ~1 GiB per engine")
@@ -46,7 +51,6 @@ func TestAutoPeriodicCompactionMode(t *testing.T) {
 	defer restore(&v3compactor.AutoPeriodicLeadTime, 1500*time.Millisecond)()
 	defer restore(&v3compactor.AutoPeriodicCooldown, 700*time.Millisecond)()
 	defer restore(&v3compactor.AutoPeriodicHighWater, 0.5)()
-	defer restore(&v3compactor.SizeCompactionSettleDelay, 150*time.Millisecond)()
 
 	const (
 		quota      = 256 << 20
@@ -119,6 +123,8 @@ func TestAutoPeriodicCompactionMode(t *testing.T) {
 				t.Logf("  RESULT: survived all %d writes (no NOSPACE)", writeTotal)
 			}
 
+			// Both engines stay under quota with compaction only (no defrag):
+			// pebble via online reclaim, bbolt via freelist page reuse.
 			require.NoError(t, tripErr, "auto-periodic should keep %s below quota under realistic load", engine)
 			require.Equal(t, writeTotal, done)
 			require.Less(t, maxSize, int64(quota), "size should stay under quota")
