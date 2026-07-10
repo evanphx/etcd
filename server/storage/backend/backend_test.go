@@ -51,6 +51,13 @@ func TestBackendClose(t *testing.T) {
 }
 
 func TestBackendSnapshot(t *testing.T) {
+	if betesting.CurrentTestEngine() == backend.EnginePebble {
+		// This test bootstraps a backend directly from the raw snapshot file,
+		// which is a bbolt-only property (a bbolt snapshot IS an openable db
+		// file). The pebble snapshot is a tar of a checkpoint; its round-trip is
+		// covered by TestPebbleSnapshotRoundTrip.
+		t.Skip("snapshot-as-openable-file is bbolt-only; pebble covered by TestPebbleSnapshotRoundTrip")
+	}
 	b, _ := betesting.NewTmpBackend(t, time.Hour, 10000)
 	defer betesting.Close(t, b)
 
@@ -89,6 +96,12 @@ func TestBackendSnapshot(t *testing.T) {
 }
 
 func TestBackendBatchIntervalCommit(t *testing.T) {
+	if betesting.CurrentTestEngine() == backend.EnginePebble {
+		// This test inspects the raw *bolt.DB via DbFromBackendForTest, a
+		// bbolt-only helper. Commit behavior on pebble is exercised by the
+		// differential/concurrent torture tests.
+		t.Skip("inspects the raw bolt DB; bbolt-only")
+	}
 	// start backend with super short batch interval so
 	// we do not need to wait long before commit to happen.
 	b, _ := betesting.NewTmpBackend(t, time.Nanosecond, 10000)
@@ -125,6 +138,11 @@ func TestBackendBatchIntervalCommit(t *testing.T) {
 }
 
 func TestBackendDefrag(t *testing.T) {
+	if betesting.CurrentTestEngine() == backend.EnginePebble {
+		// Asserts on the raw bolt DB's FreelistType (bbolt-only). Pebble defrag
+		// (online compaction) is exercised by the torture tests and TestPebbleSize.
+		t.Skip("asserts bbolt freelist config; bbolt-only")
+	}
 	bcfg := backend.DefaultBackendConfig(zaptest.NewLogger(t))
 	// Make sure we change BackendFreelistType
 	// The goal is to verify that we restore config option after defrag.

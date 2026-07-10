@@ -26,6 +26,37 @@ import (
 	"go.etcd.io/etcd/server/v3/storage/backend"
 )
 
+// TestBackendEngineEnv selects the storage engine used by test backends. Setting
+// it to "pebble" runs a whole suite against the Pebble engine; unset (or
+// "bbolt") keeps the default. This lets the real-backend consumer suites
+// (mvcc, lease, backend, ...) run under either engine without duplicating tests.
+const TestBackendEngineEnv = "ETCD_TEST_BACKEND_ENGINE"
+
+// MaybeSetEngineFromEnv sets bcfg.Engine from TestBackendEngineEnv when the
+// engine is otherwise unset. Callers that build a BackendConfig directly (rather
+// than via the helpers below) should call this to stay engine-parameterizable.
+func MaybeSetEngineFromEnv(bcfg *backend.BackendConfig) {
+	if bcfg.Engine == "" {
+		if e := os.Getenv(TestBackendEngineEnv); e != "" {
+			bcfg.Engine = backend.Engine(e)
+		}
+	}
+}
+
+// CurrentTestEngine returns the engine selected by TestBackendEngineEnv (empty
+// means the default, bbolt). Tests that exercise a bbolt-only property can skip
+// when this is EnginePebble.
+func CurrentTestEngine() backend.Engine {
+	return backend.Engine(os.Getenv(TestBackendEngineEnv))
+}
+
+// EngineOptFromEnv is a BackendConfigOption that applies TestBackendEngineEnv,
+// for reopening a backend (e.g. via NewDefaultBackend) with the same engine a
+// test's initial backend used.
+func EngineOptFromEnv() backend.BackendConfigOption {
+	return func(bcfg *backend.BackendConfig) { MaybeSetEngineFromEnv(bcfg) }
+}
+
 func NewTmpBackendFromCfg(tb testing.TB, bcfg backend.BackendConfig) (backend.Backend, string) {
 	dir, err := os.MkdirTemp(tb.TempDir(), "etcd_backend_test")
 	if err != nil {
@@ -34,6 +65,7 @@ func NewTmpBackendFromCfg(tb testing.TB, bcfg backend.BackendConfig) (backend.Ba
 	tmpPath := filepath.Join(dir, "database")
 	bcfg.Path = tmpPath
 	bcfg.Logger = zaptest.NewLogger(tb)
+	MaybeSetEngineFromEnv(&bcfg)
 	return backend.New(bcfg), tmpPath
 }
 

@@ -58,7 +58,7 @@ func TestScheduledCompact(t *testing.T) {
 			be.ForceCommit()
 			be.Close()
 
-			b := backend.NewDefaultBackend(lg, tmpPath)
+			b := backend.NewDefaultBackend(lg, tmpPath, betesting.EngineOptFromEnv())
 			defer b.Close()
 			v, found := UnsafeReadScheduledCompact(b.BatchTx())
 			assert.True(t, found)
@@ -97,7 +97,7 @@ func TestFinishedCompact(t *testing.T) {
 			be.ForceCommit()
 			be.Close()
 
-			b := backend.NewDefaultBackend(lg, tmpPath)
+			b := backend.NewDefaultBackend(lg, tmpPath, betesting.EngineOptFromEnv())
 			defer b.Close()
 			v, found := UnsafeReadFinishedCompact(b.BatchTx())
 			assert.True(t, found)

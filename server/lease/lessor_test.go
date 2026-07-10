@@ -33,6 +33,7 @@ import (
 	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/api/v3/version"
 	"go.etcd.io/etcd/server/v3/storage/backend"
+	betesting "go.etcd.io/etcd/server/v3/storage/backend/testing"
 	"go.etcd.io/etcd/server/v3/storage/schema"
 )
 
@@ -331,6 +332,7 @@ func TestLessorRenewExtendPileup(t *testing.T) {
 	be.Close()
 	bcfg := backend.DefaultBackendConfig(lg)
 	bcfg.Path = filepath.Join(dir, "be")
+	betesting.MaybeSetEngineFromEnv(&bcfg)
 	be = backend.New(bcfg)
 	defer be.Close()
 	le = newLessor(lg, be, clusterLatest(), LessorConfig{MinLeaseTTL: minLeaseTTL, leaseRevokeRate: leaseRevokeRate})
@@ -693,6 +695,7 @@ func NewTestBackend(t *testing.T) (string, backend.Backend) {
 	tmpPath := t.TempDir()
 	bcfg := backend.DefaultBackendConfig(lg)
 	bcfg.Path = filepath.Join(tmpPath, "be")
+	betesting.MaybeSetEngineFromEnv(&bcfg)
 	return tmpPath, backend.New(bcfg)
 }
 
