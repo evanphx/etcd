@@ -17,7 +17,9 @@ package backend_test
 import (
 	"fmt"
 	"math/rand"
+	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -31,6 +33,23 @@ import (
 	"go.etcd.io/etcd/server/v3/storage/backend"
 	"go.etcd.io/etcd/server/v3/storage/schema"
 )
+
+// Torture scale is tunable via env vars so a soak run can dial up op counts,
+// seed rotation and writer load without editing the tests:
+//
+//	TORTURE_OPS        - ops per differential run (default per-test)
+//	TORTURE_SEED_BASE  - offset added to every seed (rotate across soak iters)
+//	TORTURE_PERWRITER  - ops per writer in the concurrent test
+func tortureEnvInt(name string, def int) int {
+	if v := os.Getenv(name); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return def
+}
+
+func tortureSeedBase() int64 { return int64(tortureEnvInt("TORTURE_SEED_BASE", 0)) }
 
 // Buckets exercised by the torture tests: a mix of the safe-range Key bucket
 // (the only one that permits multi-key range reads) and non-safe buckets.
@@ -131,7 +150,9 @@ func TestBackendDifferentialTorture(t *testing.T) {
 	if testing.Short() {
 		seeds = seeds[:1]
 	}
+	base := tortureSeedBase()
 	for _, seed := range seeds {
+		seed += base
 		t.Run(fmt.Sprintf("seed=%d", seed), func(t *testing.T) {
 			runBackendDifferential(t, seed)
 		})
@@ -139,7 +160,7 @@ func TestBackendDifferentialTorture(t *testing.T) {
 }
 
 func runBackendDifferential(t *testing.T, seed int64) {
-	ops := 6000
+	ops := tortureEnvInt("TORTURE_OPS", 6000)
 	if testing.Short() {
 		ops = 1000
 	}
@@ -267,7 +288,7 @@ func TestBackendConcurrentTorture(t *testing.T) {
 			createTortureBuckets(be)
 
 			o := newOracle()
-			perWriter := 4000
+			perWriter := tortureEnvInt("TORTURE_PERWRITER", 4000)
 			if testing.Short() {
 				perWriter = 800
 			}

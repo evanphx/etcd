@@ -17,7 +17,9 @@ package mvcc
 import (
 	"fmt"
 	"math/rand"
+	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -27,6 +29,15 @@ import (
 	"go.etcd.io/etcd/server/v3/lease"
 	"go.etcd.io/etcd/server/v3/storage/backend"
 )
+
+func tortureEnvInt(name string, def int) int {
+	if v := os.Getenv(name); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return def
+}
 
 type tortureStore struct {
 	t      *testing.T
@@ -76,7 +87,9 @@ func TestMVCCDifferentialTorture(t *testing.T) {
 	if testing.Short() {
 		seeds = seeds[:1]
 	}
+	base := int64(tortureEnvInt("TORTURE_SEED_BASE", 0))
 	for _, seed := range seeds {
+		seed += base
 		t.Run(fmt.Sprintf("seed=%d", seed), func(t *testing.T) {
 			runMVCCDifferential(t, seed)
 		})
@@ -84,7 +97,7 @@ func TestMVCCDifferentialTorture(t *testing.T) {
 }
 
 func runMVCCDifferential(t *testing.T, seed int64) {
-	ops := 4000
+	ops := tortureEnvInt("TORTURE_OPS", 4000)
 	if testing.Short() {
 		ops = 800
 	}
