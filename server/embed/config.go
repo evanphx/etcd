@@ -151,6 +151,13 @@ var (
 	// revision 5000 when the current revision is 6000.
 	// This runs every 5-minute if enough of logs have proceeded.
 	CompactorModeRevision = v3compactor.ModeRevision
+
+	// CompactorModeSize is size-reactive compaction mode for
+	// "Config.AutoCompactionMode". When the backend reaches ~90% of
+	// "QuotaBackendBytes", it compacts (keeping the last
+	// "AutoCompactionRetention" revisions) and defrags, as a safety net against
+	// the NOSPACE alarm.
+	CompactorModeSize = v3compactor.ModeSize
 )
 
 func init() {
@@ -747,7 +754,7 @@ func (cfg *Config) AddFlags(fs *flag.FlagSet) {
 	fs.StringVar(&cfg.LogRotationConfigJSON, "log-rotation-config-json", DefaultLogRotationConfig, "Configures log rotation if enabled with a JSON logger config. Default: MaxSize=100(MB), MaxAge=0(days,no limit), MaxBackups=0(no limit), LocalTime=false(UTC), Compress=false(gzip)")
 
 	fs.StringVar(&cfg.AutoCompactionRetention, "auto-compaction-retention", "0", "Auto compaction retention for mvcc key value store. 0 means disable auto compaction.")
-	fs.StringVar(&cfg.AutoCompactionMode, "auto-compaction-mode", "periodic", "interpret 'auto-compaction-retention' one of: periodic|revision. 'periodic' for duration based retention, defaulting to hours if no time unit is provided (e.g. '5m'). 'revision' for revision number based retention.")
+	fs.StringVar(&cfg.AutoCompactionMode, "auto-compaction-mode", "periodic", "interpret 'auto-compaction-retention' one of: periodic|revision|size. 'periodic' for duration based retention, defaulting to hours if no time unit is provided (e.g. '5m'). 'revision' for revision number based retention. 'size' reactively compacts (keeping 'auto-compaction-retention' revisions) when the backend reaches ~90% of quota-backend-bytes.")
 
 	// pprof profiler via HTTP
 	fs.BoolVar(&cfg.EnablePprof, "enable-pprof", false, "Enable runtime profiling data via HTTP server. Address is at client URL + \"/debug/pprof/\"")
@@ -1035,7 +1042,7 @@ func (cfg *Config) Validate() error {
 	}
 
 	switch cfg.AutoCompactionMode {
-	case CompactorModeRevision, CompactorModePeriodic:
+	case CompactorModeRevision, CompactorModePeriodic, CompactorModeSize:
 	case "":
 		return errors.New("undefined auto-compaction-mode")
 	default:

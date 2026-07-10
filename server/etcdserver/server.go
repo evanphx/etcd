@@ -377,7 +377,20 @@ func NewServer(cfg config.ServerConfig) (srv *EtcdServer, err error) {
 		}
 	}()
 	if num := cfg.AutoCompactionRetention; num != 0 {
-		srv.compactor, err = v3compactor.New(cfg.Logger, cfg.AutoCompactionMode, num, srv.kv, srv)
+		// Effective quota mirrors storage.NewBackendQuota's default (2 GiB when
+		// unset); used by the size compactor's threshold.
+		quotaBytes := cfg.QuotaBackendBytes
+		if quotaBytes <= 0 {
+			quotaBytes = int64(2 * 1024 * 1024 * 1024)
+		}
+		// The size compactor defrags to reclaim space for bbolt (whose file does
+		// not shrink on compaction); pebble reclaims online via background
+		// compaction, and a forced defrag would only spike its DiskSpaceUsage.
+		var defragger v3compactor.Defragger
+		if backend.Engine(cfg.BackendEngine) != backend.EnginePebble {
+			defragger = srv.be
+		}
+		srv.compactor, err = v3compactor.New(cfg.Logger, cfg.AutoCompactionMode, num, srv.kv, srv, srv.be, defragger, quotaBytes)
 		if err != nil {
 			return nil, err
 		}

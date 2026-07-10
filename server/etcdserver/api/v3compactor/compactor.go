@@ -28,6 +28,9 @@ import (
 const (
 	ModePeriodic = "periodic"
 	ModeRevision = "revision"
+	// ModeSize compacts reactively when the backend size approaches the quota,
+	// as a safety net against the NOSPACE alarm. See size.go.
+	ModeSize = "size"
 )
 
 // Compactor purges old log from the storage periodically.
@@ -51,13 +54,30 @@ type RevGetter interface {
 	Rev() int64
 }
 
+// SizeGetter reports the current backend size (used by the size compactor).
+type SizeGetter interface {
+	Size() int64
+}
+
+// Defragger reclaims backend space (used by the size compactor to make the
+// compacted revisions' space actually available before the quota is hit).
+type Defragger interface {
+	Defrag() error
+}
+
 // New returns a new Compactor based on given "mode".
+//
+// sg/df/maxBytes are only consulted by ModeSize; the periodic and revision
+// compactors ignore them.
 func New(
 	lg *zap.Logger,
 	mode string,
 	retention time.Duration,
 	rg RevGetter,
 	c Compactable,
+	sg SizeGetter,
+	df Defragger,
+	maxBytes int64,
 ) (Compactor, error) {
 	if lg == nil {
 		lg = zap.NewNop()
@@ -67,6 +87,8 @@ func New(
 		return newPeriodic(lg, clockwork.NewRealClock(), retention, rg, c), nil
 	case ModeRevision:
 		return newRevision(lg, clockwork.NewRealClock(), int64(retention), rg, c), nil
+	case ModeSize:
+		return newSize(lg, clockwork.NewRealClock(), int64(retention), rg, c, sg, df, maxBytes), nil
 	default:
 		return nil, fmt.Errorf("unsupported compaction mode %s", mode)
 	}
