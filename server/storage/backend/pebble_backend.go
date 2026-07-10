@@ -258,35 +258,35 @@ func (b *pebbleBackend) Commits() int64 {
 	return atomic.LoadInt64(&b.commits)
 }
 
-// Defrag triggers a manual LSM compaction over the whole occupied key range.
-// Unlike bbolt's stop-the-world defrag, Pebble compaction is online, so this
-// does not block reads or writes; it forces obsolete data to be reclaimed.
+// Defrag triggers a manual LSM compaction to reclaim obsolete data and
+// tombstones. Unlike bbolt's stop-the-world defrag, Pebble compaction is online
+// (it does not block reads or writes); Pebble's background compaction also
+// performs this automatically over time, so Defrag is rarely required.
+//
+// It compacts every registered bucket's full prefix range. Deriving the range
+// from live keys is not sufficient: a heavy overwrite-then-compact workload
+// leaves many point tombstones sorting outside the surviving keys, and those are
+// only dropped when their whole key range is compacted.
 func (b *pebbleBackend) Defrag() error {
 	b.mu.RLock()
 	db := b.db
 	b.mu.RUnlock()
 
-	// Compact requires an explicit [start, end) that brackets the live keys.
-	iter, err := db.NewIter(nil)
-	if err != nil {
-		return err
-	}
-	var start, end []byte
-	if iter.First() {
-		start = append([]byte{}, iter.Key()...)
-		if iter.Last() {
-			// exclusive upper bound just past the last key
-			end = append(append([]byte{}, iter.Key()...), 0x00)
+	buckets := registeredBucketsSorted()
+	if len(buckets) == 0 {
+		// No registered buckets (e.g. an isolated backend test without schema):
+		// fall back to compacting the whole possible keyspace. Bucket IDs are a
+		// single prefix byte, so [0x00, 0xff] covers all data.
+		if err := db.Compact(context.Background(), []byte{0x00}, []byte{0xff}, true); err != nil {
+			return err
 		}
+		b.updateSize()
+		return nil
 	}
-	if err := iter.Close(); err != nil {
-		return err
-	}
-	if start == nil || end == nil {
-		return nil // empty store, nothing to compact
-	}
-	if err := db.Compact(context.Background(), start, end, true); err != nil {
-		return err
+	for _, bucket := range buckets {
+		if err := db.Compact(context.Background(), bucketLowerBound(bucket), bucketUpperBound(bucket), true); err != nil {
+			return err
+		}
 	}
 	b.updateSize()
 	return nil
