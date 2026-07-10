@@ -152,13 +152,6 @@ var (
 	// This runs every 5-minute if enough of logs have proceeded.
 	CompactorModeRevision = v3compactor.ModeRevision
 
-	// CompactorModeSize is size-reactive compaction mode for
-	// "Config.AutoCompactionMode". When the backend reaches ~90% of
-	// "QuotaBackendBytes", it compacts (keeping the last
-	// "AutoCompactionRetention" revisions) and defrags, as a safety net against
-	// the NOSPACE alarm.
-	CompactorModeSize = v3compactor.ModeSize
-
 	// CompactorModeAutoPeriodic samples the backend growth rate and compacts
 	// proactively (keeping the last "AutoCompactionRetention" revisions), timing
 	// each compaction from the measured workload so the size stays well below
@@ -760,7 +753,7 @@ func (cfg *Config) AddFlags(fs *flag.FlagSet) {
 	fs.StringVar(&cfg.LogRotationConfigJSON, "log-rotation-config-json", DefaultLogRotationConfig, "Configures log rotation if enabled with a JSON logger config. Default: MaxSize=100(MB), MaxAge=0(days,no limit), MaxBackups=0(no limit), LocalTime=false(UTC), Compress=false(gzip)")
 
 	fs.StringVar(&cfg.AutoCompactionRetention, "auto-compaction-retention", "0", "Auto compaction retention for mvcc key value store. 0 means disable auto compaction.")
-	fs.StringVar(&cfg.AutoCompactionMode, "auto-compaction-mode", "periodic", "interpret 'auto-compaction-retention' one of: periodic|revision|size|auto-periodic. 'periodic' for duration based retention, defaulting to hours if no time unit is provided (e.g. '5m'). 'revision' for revision number based retention. 'size' reactively compacts when the backend reaches ~90% of quota-backend-bytes. 'auto-periodic' samples the growth rate and compacts proactively to keep the size well below quota. Both keep the last 'auto-compaction-retention' revisions.")
+	fs.StringVar(&cfg.AutoCompactionMode, "auto-compaction-mode", "periodic", "interpret 'auto-compaction-retention' one of: periodic|revision|auto-periodic. 'periodic' for duration based retention, defaulting to hours if no time unit is provided (e.g. '5m'). 'revision' for revision number based retention. 'auto-periodic' samples the growth rate and compacts proactively (keeping the last 'auto-compaction-retention' revisions) to keep the size well below quota.")
 
 	// pprof profiler via HTTP
 	fs.BoolVar(&cfg.EnablePprof, "enable-pprof", false, "Enable runtime profiling data via HTTP server. Address is at client URL + \"/debug/pprof/\"")
@@ -1048,7 +1041,7 @@ func (cfg *Config) Validate() error {
 	}
 
 	switch cfg.AutoCompactionMode {
-	case CompactorModeRevision, CompactorModePeriodic, CompactorModeSize, CompactorModeAutoPeriodic:
+	case CompactorModeRevision, CompactorModePeriodic, CompactorModeAutoPeriodic:
 	case "":
 		return errors.New("undefined auto-compaction-mode")
 	default:

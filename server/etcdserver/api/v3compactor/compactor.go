@@ -28,9 +28,6 @@ import (
 const (
 	ModePeriodic = "periodic"
 	ModeRevision = "revision"
-	// ModeSize compacts reactively when the backend size approaches the quota,
-	// as a safety net against the NOSPACE alarm. See size.go.
-	ModeSize = "size"
 	// ModeAutoPeriodic samples the backend growth rate and compacts proactively,
 	// timing each compaction so the size never approaches the quota. See
 	// autoperiodic.go.
@@ -58,22 +55,22 @@ type RevGetter interface {
 	Rev() int64
 }
 
-// SizeGetter reports the current backend size (used by the size and
-// auto-periodic compactors).
+// SizeGetter reports the current backend size (used by the auto-periodic
+// compactor).
 type SizeGetter interface {
 	Size() int64
 }
 
 // New returns a new Compactor based on given "mode".
 //
-// sg/maxBytes are only consulted by the size and auto-periodic modes; the
-// periodic and revision compactors ignore them.
+// sg/maxBytes are only consulted by the auto-periodic mode; the periodic and
+// revision compactors ignore them.
 //
-// Like the periodic and revision modes, the size and auto-periodic modes only
-// compact; they never defrag. Reclaiming physical space is left to the engine
-// (online for pebble) or to an operator (manual defrag for bbolt), matching
-// etcd's long-standing separation of compaction (routine) from defrag
-// (disruptive, operator-initiated).
+// Like the periodic and revision modes, the auto-periodic mode only compacts; it
+// never defrags. Reclaiming physical space is left to the engine (online for
+// pebble) or to an operator (manual defrag for bbolt), matching etcd's
+// long-standing separation of compaction (routine) from defrag (disruptive,
+// operator-initiated).
 func New(
 	lg *zap.Logger,
 	mode string,
@@ -91,8 +88,6 @@ func New(
 		return newPeriodic(lg, clockwork.NewRealClock(), retention, rg, c), nil
 	case ModeRevision:
 		return newRevision(lg, clockwork.NewRealClock(), int64(retention), rg, c), nil
-	case ModeSize:
-		return newSize(lg, clockwork.NewRealClock(), int64(retention), rg, c, sg, maxBytes), nil
 	case ModeAutoPeriodic:
 		return newAutoPeriodic(lg, clockwork.NewRealClock(), int64(retention), rg, c, sg, maxBytes), nil
 	default:

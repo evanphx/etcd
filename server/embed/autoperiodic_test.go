@@ -15,6 +15,7 @@
 package embed
 
 import (
+	"fmt"
 	"math/rand"
 	"testing"
 	"time"
@@ -130,4 +131,14 @@ func TestAutoPeriodicCompactionMode(t *testing.T) {
 			require.Less(t, maxSize, int64(quota), "size should stay under quota")
 		})
 	}
+}
+
+func mib256(n int64) string { return fmt.Sprintf("%.1f MiB", float64(n)/(1<<20)) }
+
+// restore sets *p to v and returns a func that restores the old value (for
+// overriding package tuning vars in a test).
+func restore[T any](p *T, v T) func() {
+	old := *p
+	*p = v
+	return func() { *p = old }
 }
