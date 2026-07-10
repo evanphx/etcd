@@ -182,7 +182,7 @@ Clustering:
   --auto-compaction-retention '0'
     Auto compaction retention length. 0 means disable auto compaction.
   --auto-compaction-mode 'periodic'
-    Interpret 'auto-compaction-retention' one of: periodic|revision|size. 'periodic' for duration based retention, defaulting to hours if no time unit is provided (e.g. '5m'). 'revision' for revision number based retention. 'size' reactively compacts (keeping 'auto-compaction-retention' revisions) when the backend reaches ~90% of quota-backend-bytes.
+    Interpret 'auto-compaction-retention' one of: periodic|revision|size|auto-periodic. 'periodic' for duration based retention, defaulting to hours if no time unit is provided (e.g. '5m'). 'revision' for revision number based retention. 'size' reactively compacts when the backend reaches ~90% of quota-backend-bytes. 'auto-periodic' samples the growth rate and compacts proactively to keep the size well below quota. Both keep the last 'auto-compaction-retention' revisions.
   --v2-deprecation '` + string(cconfig.V2DeprDefault) + `'
     Phase of v2store deprecation. Deprecated and scheduled for removal in v3.8. The default value is enforced, ignoring user input.
     Supported values:

@@ -936,7 +936,7 @@ func parseCompactionRetention(mode, retention string) (ret time.Duration, err er
 	h, err := strconv.Atoi(retention)
 	if err == nil && h >= 0 {
 		switch mode {
-		case CompactorModeRevision, CompactorModeSize:
+		case CompactorModeRevision, CompactorModeSize, CompactorModeAutoPeriodic:
 			// Both interpret retention as a revision count (revisions to keep).
 			ret = time.Duration(int64(h))
 		case CompactorModePeriodic:

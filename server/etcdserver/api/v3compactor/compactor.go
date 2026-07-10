@@ -31,6 +31,10 @@ const (
 	// ModeSize compacts reactively when the backend size approaches the quota,
 	// as a safety net against the NOSPACE alarm. See size.go.
 	ModeSize = "size"
+	// ModeAutoPeriodic samples the backend growth rate and compacts proactively,
+	// timing each compaction so the size never approaches the quota. See
+	// autoperiodic.go.
+	ModeAutoPeriodic = "auto-periodic"
 )
 
 // Compactor purges old log from the storage periodically.
@@ -89,6 +93,8 @@ func New(
 		return newRevision(lg, clockwork.NewRealClock(), int64(retention), rg, c), nil
 	case ModeSize:
 		return newSize(lg, clockwork.NewRealClock(), int64(retention), rg, c, sg, df, maxBytes), nil
+	case ModeAutoPeriodic:
+		return newAutoPeriodic(lg, clockwork.NewRealClock(), int64(retention), rg, c, sg, df, maxBytes), nil
 	default:
 		return nil, fmt.Errorf("unsupported compaction mode %s", mode)
 	}
