@@ -28,26 +28,35 @@ import (
 	"go.etcd.io/etcd/server/v3/storage/mvcc"
 )
 
-// AutoPeriodic tuning. These are vars so tests can shorten them.
+// AutoPeriodic tuning. These are vars (not consts) so tests can shorten them and
+// operators could override them; the defaults target a conservative safety-net
+// backstop that stays out of the way until the backend trends toward its quota.
 var (
-	// AutoPeriodicHighWater is the fraction of the quota the compactor steers
-	// the backend to stay below. It compacts before the *predicted* size reaches
-	// this, leaving headroom for the reclaim to take effect.
+	// AutoPeriodicHighWater is the fraction of the quota the compactor steers the
+	// backend to stay below. It compacts before the *projected* size reaches
+	// this, leaving headroom for the reclaim to take effect. 0.7 keeps ~30%
+	// headroom, which also absorbs pebble's transient DiskSpaceUsage
+	// amplification during compaction.
 	AutoPeriodicHighWater = 0.7
 
-	// AutoPeriodicSampleInterval is how often the size/rate is sampled.
-	AutoPeriodicSampleInterval = 1 * time.Second
+	// AutoPeriodicSampleInterval is how often the size/rate is sampled. Size() is
+	// a cached atomic load, so sampling is cheap.
+	AutoPeriodicSampleInterval = 10 * time.Second
 
-	// AutoPeriodicLeadTime is how far ahead the size is projected when deciding
-	// to compact. It should cover the time for a compaction + reclaim to actually
-	// lower the reported size (longer for pebble's online reclaim).
-	AutoPeriodicLeadTime = 10 * time.Second
+	// AutoPeriodicLeadTime is how far ahead the size is projected when deciding to
+	// compact. Slow growth then effectively compacts at the high-water mark, while
+	// fast growth triggers earlier (more headroom exactly when needed). It should
+	// comfortably exceed the time for a compaction + reclaim to lower the size.
+	AutoPeriodicLeadTime = 5 * time.Minute
 
-	// AutoPeriodicCooldown is the minimum time between compactions, to let a
-	// reclaim settle before re-evaluating.
-	AutoPeriodicCooldown = 10 * time.Second
+	// AutoPeriodicCooldown is the minimum time between compactions: enough to
+	// avoid thrashing and let a reclaim settle, short enough to re-compact under
+	// sustained growth.
+	AutoPeriodicCooldown = 1 * time.Minute
 
-	// autoPeriodicRateAlpha is the EWMA smoothing factor for the growth rate.
+	// autoPeriodicRateAlpha is the EWMA smoothing factor for the growth rate:
+	// higher reacts faster to bursts, lower is steadier. At the 10s sample
+	// interval, 0.3 reflects roughly the last ~30-40s of trend.
 	autoPeriodicRateAlpha = 0.3
 )
 
@@ -139,8 +148,7 @@ func (ac *AutoPeriodic) Run() {
 
 			// Project the size LeadTime into the future; compact if it would
 			// reach the high-water mark by then.
-			projected := float64(size) + rate*AutoPeriodicLeadTime.Seconds()
-			if projected < float64(highWater) {
+			if !ac.shouldCompact(size, rate) {
 				continue
 			}
 
@@ -179,6 +187,14 @@ func (ac *AutoPeriodic) Run() {
 			)
 		}
 	}()
+}
+
+// shouldCompact reports whether, at the current size and growth rate, the size
+// is projected to reach the high-water mark within AutoPeriodicLeadTime.
+func (ac *AutoPeriodic) shouldCompact(size int64, rate float64) bool {
+	highWater := AutoPeriodicHighWater * float64(ac.maxBytes)
+	projected := float64(size) + rate*AutoPeriodicLeadTime.Seconds()
+	return projected >= highWater
 }
 
 // Stop stops the auto-periodic compactor.
