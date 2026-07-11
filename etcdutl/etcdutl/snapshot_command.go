@@ -83,7 +83,7 @@ func NewSnapshotRestoreCommand() *cobra.Command {
 	cmd.Flags().Uint64Var(&initialMmapSize, "initial-memory-map-size", initialMmapSize, "Initial memory map size of the database in bytes. It uses the default value if not defined or defined to 0")
 	cmd.Flags().Uint64Var(&revisionBump, "bump-revision", 0, "How much to increase the latest revision after restore")
 	cmd.Flags().BoolVar(&markCompacted, "mark-compacted", false, "Mark the latest revision after restore as the point of scheduled compaction (required if --bump-revision > 0, disallowed otherwise)")
-	cmd.Flags().StringVar(&restoreBackendEngine, "backend-engine", "", "Target storage engine for the restored data directory (bbolt or pebble). Empty preserves the snapshot's engine. A bbolt snapshot may be restored into pebble (converted during restore); pebble->bbolt is not supported.")
+	cmd.Flags().StringVar(&restoreBackendEngine, "backend-engine", "", "Target storage engine for the restored data directory (bbolt or pebble). Empty preserves the snapshot's engine; a differing engine converts the snapshot during restore (both bbolt<->pebble directions are supported).")
 
 	cmd.MarkFlagDirname("data-dir")
 	cmd.MarkFlagDirname("wal-dir")

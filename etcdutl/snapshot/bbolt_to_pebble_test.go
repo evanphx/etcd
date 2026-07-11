@@ -112,20 +112,41 @@ func TestRestoreBboltSnapshotIntoPebble(t *testing.T) {
 	require.Positive(t, count, "restored pebble store should contain keyspace revisions")
 }
 
-// TestRestorePebbleSnapshotIntoBboltRejected verifies the unsupported reverse
-// conversion is rejected rather than silently mishandled.
-func TestRestorePebbleSnapshotIntoBboltRejected(t *testing.T) {
+// TestRestorePebbleSnapshotIntoBbolt verifies the reverse conversion: a Pebble
+// snapshot restored with --backend-engine=bbolt becomes a bbolt data directory.
+func TestRestorePebbleSnapshotIntoBbolt(t *testing.T) {
 	lg := zaptest.NewLogger(t)
-	snapPath := savePebbleSnapshot(t, 5)
+	snapPath := savePebbleSnapshot(t, 10)
+	require.Equal(t, backend.EnginePebble, detectSnapshotEngine(snapPath))
 
+	outDir := filepath.Join(t.TempDir(), "restored")
 	err := NewV3(lg).Restore(RestoreConfig{
 		SnapshotPath:        snapPath,
 		Name:                "default",
-		OutputDataDir:       filepath.Join(t.TempDir(), "restored"),
+		OutputDataDir:       outDir,
 		PeerURLs:            []string{"http://localhost:2380"},
 		InitialCluster:      "default=http://localhost:2380",
 		InitialClusterToken: "etcd-cluster",
-		BackendEngine:       "bbolt",
+		BackendEngine:       "bbolt", // convert pebble -> bbolt
 	})
-	require.ErrorContains(t, err, "only bbolt -> pebble conversion is supported")
+	require.NoError(t, err)
+
+	// The restored backend is now a bbolt file holding the data.
+	dbPath := filepath.Join(outDir, "member", "snap", "db")
+	info, err := os.Stat(dbPath)
+	require.NoError(t, err)
+	require.False(t, info.IsDir(), "bbolt backend path should be a file")
+
+	be := backend.NewDefaultBackend(lg, dbPath, backend.WithEngine(backend.EngineBBolt))
+	defer be.Close()
+	rtx := be.ReadTx()
+	rtx.RLock()
+	count := 0
+	err = rtx.UnsafeForEach(schema.Key, func(_, _ []byte) error {
+		count++
+		return nil
+	})
+	rtx.RUnlock()
+	require.NoError(t, err)
+	require.Positive(t, count, "restored bbolt store should contain keyspace revisions")
 }

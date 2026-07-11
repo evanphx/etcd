@@ -413,9 +413,7 @@ func (s *v3Manager) Restore(cfg RestoreConfig) error {
 	default:
 		return fmt.Errorf("unknown --backend-engine %q (supported: bbolt, pebble)", cfg.BackendEngine)
 	}
-	if s.srcEngine != s.engine && !(s.srcEngine == backend.EngineBBolt && s.engine == backend.EnginePebble) {
-		return fmt.Errorf("cannot restore a %s snapshot into the %s engine; only bbolt -> pebble conversion is supported", s.srcEngine, s.engine)
-	}
+	// Both cross-engine directions are supported via the bboltfile codec.
 
 	s.lg.Info(
 		"restoring snapshot",
@@ -616,18 +614,53 @@ func (s *v3Manager) copyAndVerifyDB() error {
 	// db hash is OK, can now modify DB so it can be part of a new cluster
 
 	switch {
-	case s.srcEngine == backend.EnginePebble:
-		// The verified artifact is a tar of a Pebble checkpoint; expand it into
-		// the store directory expected at outDbPath. (Target is Pebble.)
+	case s.srcEngine == s.engine && s.engine == backend.EnginePebble:
+		// Pebble -> Pebble: expand the verified checkpoint tar into the store
+		// directory expected at outDbPath.
 		return s.expandPebbleSnapshot()
-	case s.engine == backend.EnginePebble:
-		// A bbolt snapshot restored into Pebble: convert the verified bbolt file
-		// at outDbPath into a Pebble store directory.
+	case s.srcEngine == s.engine:
+		// bbolt -> bbolt: the verified file is already the db.
+		return nil
+	case s.srcEngine == backend.EngineBBolt:
+		// bbolt -> Pebble: convert the verified bbolt file into a Pebble store.
 		return s.convertBboltSnapshotToPebble()
 	default:
-		// bbolt snapshot into bbolt: the verified file is already the db.
-		return nil
+		// Pebble -> bbolt: convert the verified checkpoint tar into a bbolt file.
+		return s.convertPebbleSnapshotToBbolt()
 	}
+}
+
+// convertPebbleSnapshotToBbolt replaces the verified Pebble checkpoint tar at
+// outDbPath with a bbolt database file holding the same logical content.
+func (s *v3Manager) convertPebbleSnapshotToBbolt() error {
+	outDbPath := s.outDbPath()
+	tarPath := outDbPath + ".tar"
+	if err := os.Rename(outDbPath, tarPath); err != nil {
+		return err
+	}
+	staging := outDbPath + ".stage"
+	if err := os.RemoveAll(staging); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(staging, 0o700); err != nil {
+		return err
+	}
+	f, err := os.Open(tarPath)
+	if err != nil {
+		return err
+	}
+	ckptDir, err := backend.UntarPebbleSnapshot(f, staging)
+	f.Close()
+	if err != nil {
+		return err
+	}
+	if err := backend.ExportPebbleToBbolt(s.lg, ckptDir, outDbPath, schema.AllBuckets); err != nil {
+		return fmt.Errorf("failed to convert pebble snapshot into bbolt: %w", err)
+	}
+	if err := os.RemoveAll(staging); err != nil {
+		return err
+	}
+	return os.Remove(tarPath)
 }
 
 // convertBboltSnapshotToPebble replaces the verified bbolt database file sitting
