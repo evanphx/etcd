@@ -71,7 +71,7 @@ func TestWriteThrottleConcurrentRate(t *testing.T) {
 	var phys, logi atomic.Int64
 	w := NewWriteThrottle(DefaultThrottleParams(1000, 0),
 		func() int64 { return phys.Load() },
-		func() int64 { return logi.Load() })
+		func() int64 { return logi.Load() }, 0)
 	w.baseRate = 2000 // pretend the workload's full-speed rate is 2000/s
 
 	// u = 900/1000 = 0.90 -> fraction 0.51 -> target ~= 1020 ops/s.
@@ -112,7 +112,7 @@ func TestWriteThrottleConcurrentRate(t *testing.T) {
 func TestWriteThrottleUnthrottledAndDisabled(t *testing.T) {
 	var phys atomic.Int64
 	w := NewWriteThrottle(DefaultThrottleParams(1000, 0),
-		func() int64 { return phys.Load() }, func() int64 { return 0 })
+		func() int64 { return phys.Load() }, func() int64 { return 0 }, 0)
 	phys.Store(500) // u = 0.5 < softStart -> fraction 1 -> +Inf limit
 	w.apply(0)
 
@@ -126,7 +126,7 @@ func TestWriteThrottleUnthrottledAndDisabled(t *testing.T) {
 	}
 	require.Greater(t, n, int64(5000), "unthrottled path should not cap")
 
-	off := NewWriteThrottle(DefaultThrottleParams(0, 0), func() int64 { return 1 << 40 }, func() int64 { return 1 << 40 })
+	off := NewWriteThrottle(DefaultThrottleParams(0, 0), func() int64 { return 1 << 40 }, func() int64 { return 1 << 40 }, 0)
 	require.True(t, off.disabled)
 	require.NoError(t, off.Wait(context.Background()))
 }
@@ -145,6 +145,45 @@ func TestNewThrottleParamsClamping(t *testing.T) {
 	require.Equal(t, 0.1, p.MinFraction)
 	require.Equal(t, int64(10), p.PhysicalQuota)
 	require.Equal(t, int64(20), p.LogicalQuota)
+}
+
+// TestWriteThrottleFixedBaseRate verifies a configured base rate is used
+// verbatim and never moved by observed traffic, giving deterministic throttling.
+func TestWriteThrottleFixedBaseRate(t *testing.T) {
+	var phys atomic.Int64
+	w := NewWriteThrottle(DefaultThrottleParams(1000, 0),
+		func() int64 { return phys.Load() }, func() int64 { return 0 }, 2000)
+	require.True(t, w.fixedBase)
+	require.Equal(t, 2000.0, w.baseRate)
+
+	// An un-throttled interval with huge observed traffic must not move it.
+	phys.Store(500) // u=0.5 -> fraction 1 (un-throttled)
+	w.apply(99999)
+	require.Equal(t, 2000.0, w.baseRate)
+
+	// Throttling scales against the fixed base: u=0.9 -> fraction 0.51.
+	phys.Store(900)
+	w.apply(0)
+	require.InDelta(t, 0.51*2000, float64(w.lim.Limit()), 1)
+}
+
+// TestWriteThrottleNeverLearnedUsesSeed validates the fallback the review
+// flagged: a store persistently over its quota never sees an un-throttled
+// interval, so the auto base rate stays at the seed and the limit is a sane,
+// non-zero floor rather than stalling or exploding.
+func TestWriteThrottleNeverLearnedUsesSeed(t *testing.T) {
+	var phys atomic.Int64
+	w := NewWriteThrottle(DefaultThrottleParams(1000, 0),
+		func() int64 { return phys.Load() }, func() int64 { return 0 }, 0)
+	require.False(t, w.fixedBase)
+	require.Equal(t, throttleDefaultBaseRate, w.baseRate)
+
+	phys.Store(1000) // at quota -> fraction = minFraction; never un-throttled
+	w.apply(0)
+	require.Equal(t, throttleDefaultBaseRate, w.baseRate, "seed unchanged")
+	got := float64(w.lim.Limit())
+	require.Greater(t, got, 0.0)
+	require.InDelta(t, DefaultThrottleMinFraction*throttleDefaultBaseRate, got, 1)
 }
 
 func TestThrottleFractionMonotonic(t *testing.T) {

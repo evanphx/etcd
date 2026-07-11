@@ -2431,6 +2431,7 @@ func (s *EtcdServer) WriteThrottle() *serverstorage.WriteThrottle {
 		s.writeThrottle = serverstorage.NewWriteThrottle(params,
 			func() int64 { return s.Backend().Size() },
 			func() int64 { return s.KV().LogicalBytes() },
+			s.Cfg.QuotaThrottleBaseRate,
 		)
 	})
 	return s.writeThrottle

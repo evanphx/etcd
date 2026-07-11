@@ -108,6 +108,10 @@ func TestQuotaModeInvalidRejected(t *testing.T) {
 	badFrac.QuotaThrottleMinFraction = -0.1
 	require.Error(t, badFrac.Validate())
 
+	badRate := base()
+	badRate.QuotaThrottleBaseRate = -1
+	require.Error(t, badRate.Validate())
+
 	good := base()
 	good.QuotaMode = "soft"
 	good.QuotaThrottleSoftStart = 0.7

@@ -156,6 +156,10 @@ type WriteThrottle struct {
 
 	lim *rate.Limiter
 
+	// fixedBase is set when the base rate was configured explicitly; the base
+	// rate is then never learned from traffic, giving a deterministic throttle.
+	fixedBase bool
+
 	// lastUpdateNano and admitted are read/written atomically from the write
 	// path. baseRate is only touched by the interval's CAS winner.
 	lastUpdateNano int64
@@ -166,13 +170,26 @@ type WriteThrottle struct {
 // NewWriteThrottle builds a throttle for the given policy, reading current sizes
 // via physical (backend on-disk Size) and logical (mvcc live-keyspace bytes).
 // When both quotas are disabled the throttle is a no-op.
-func NewWriteThrottle(params ThrottleParams, physical, logical func() int64) *WriteThrottle {
+//
+// baseRate is the full-speed write rate (ops/sec) that fraction 1.0 corresponds
+// to. When >0 it is used as a fixed reference (deterministic throttling). When
+// 0, the throttle auto-measures it from intervals where nothing is throttled,
+// seeded at throttleDefaultBaseRate — but note that a store which is persistently
+// over its soft quota never observes an un-throttled interval, so the seed
+// governs until utilization drops; set baseRate to make the throttle
+// independent of that estimate.
+func NewWriteThrottle(params ThrottleParams, physical, logical func() int64, baseRate float64) *WriteThrottle {
 	w := &WriteThrottle{
 		params:   params,
 		physical: physical,
 		logical:  logical,
 		disabled: params.PhysicalQuota <= 0 && params.LogicalQuota <= 0,
-		baseRate: throttleDefaultBaseRate,
+	}
+	if baseRate > 0 {
+		w.baseRate = baseRate
+		w.fixedBase = true
+	} else {
+		w.baseRate = throttleDefaultBaseRate
 	}
 	if !w.disabled {
 		w.lim = rate.NewLimiter(rate.Inf, throttleBurst)
@@ -247,11 +264,15 @@ func (w *WriteThrottle) maybeUpdate() {
 func (w *WriteThrottle) apply(observed float64) {
 	frac := w.params.Fraction(w.physical(), w.logical())
 	if frac >= 1 {
-		switch {
-		case observed > w.baseRate:
-			w.baseRate = observed // ratchet up to newly seen capacity
-		case observed > 0:
-			w.baseRate = 0.7*w.baseRate + 0.3*observed // decay slowly
+		// Nothing throttled: lift the limit and (unless the base rate is fixed)
+		// learn the workload's natural full-speed rate for later scaling.
+		if !w.fixedBase {
+			switch {
+			case observed > w.baseRate:
+				w.baseRate = observed // ratchet up to newly seen capacity
+			case observed > 0:
+				w.baseRate = 0.7*w.baseRate + 0.3*observed // decay slowly
+			}
 		}
 		w.lim.SetLimit(rate.Inf)
 		return

@@ -205,6 +205,7 @@ func StartEtcd(inCfg *Config) (e *Etcd, err error) {
 		QuotaBackendDiskReserveBytes:      cfg.QuotaBackendDiskReserveBytes,
 		QuotaThrottleSoftStart:            cfg.QuotaThrottleSoftStart,
 		QuotaThrottleMinFraction:          cfg.QuotaThrottleMinFraction,
+		QuotaThrottleBaseRate:             cfg.QuotaThrottleBaseRate,
 		BackendBatchLimit:                 cfg.BackendBatchLimit,
 		BackendFreelistType:               backendFreelistType,
 		BackendEngine:                     cfg.BackendEngine,

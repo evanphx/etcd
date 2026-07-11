@@ -252,6 +252,7 @@ type Config struct {
 	QuotaBackendDiskReserveBytes      int64   `json:"quota-backend-disk-reserve-bytes"`
 	QuotaThrottleSoftStart            float64 `json:"quota-throttle-soft-start"`
 	QuotaThrottleMinFraction          float64 `json:"quota-throttle-min-fraction"`
+	QuotaThrottleBaseRate             float64 `json:"quota-throttle-base-rate"`
 	MaxTxnOps                         uint    `json:"max-txn-ops"`
 	MaxRequestBytes                   uint    `json:"max-request-bytes"`
 
@@ -661,6 +662,7 @@ func (cfg *Config) AddFlags(fs *flag.FlagSet) {
 	fs.Int64Var(&cfg.QuotaBackendDiskReserveBytes, "quota-backend-disk-reserve-bytes", cfg.QuotaBackendDiskReserveBytes, "In --quota-mode=soft, the free-space margin (in bytes) kept on the backend filesystem: writes hard-stop with NOSPACE once free disk would fall below it, so etcd fails read-only instead of crashing on ENOSPC. 0 uses the 100MiB default; negative disables the disk backstop.")
 	fs.Float64Var(&cfg.QuotaThrottleSoftStart, "quota-throttle-soft-start", cfg.QuotaThrottleSoftStart, "In --quota-mode=soft, the soft-quota utilization (fraction in (0,1)) at which write throttling begins; below it writes run at full speed. 0 uses the 0.80 default.")
 	fs.Float64Var(&cfg.QuotaThrottleMinFraction, "quota-throttle-min-fraction", cfg.QuotaThrottleMinFraction, "In --quota-mode=soft, the floor on the permitted write-rate fraction (in (0,1]) once a soft quota is reached; a soft quota throttles hard but never fully stops writes. 0 uses the 0.02 default.")
+	fs.Float64Var(&cfg.QuotaThrottleBaseRate, "quota-throttle-base-rate", cfg.QuotaThrottleBaseRate, "In --quota-mode=soft, the full-speed write rate (ops/sec) the throttle scales against. 0 (default) auto-measures it from un-throttled traffic; a positive value pins it for deterministic throttling (useful when the store is persistently near quota and never observes un-throttled traffic).")
 	fs.StringVar(&cfg.BackendFreelistType, "backend-bbolt-freelist-type", cfg.BackendFreelistType, "BackendFreelistType specifies the type of freelist that boltdb backend uses(array and map are supported types)")
 	fs.StringVar(&cfg.BackendEngine, "backend-engine", cfg.BackendEngine, "BackendEngine selects the storage engine that backs the state machine (bbolt or pebble). Defaults to bbolt.")
 	fs.Int64Var(&cfg.PebbleCacheBytes, "pebble-cache-bytes", cfg.PebbleCacheBytes, "Pebble engine: block cache size in bytes (0 = Pebble default).")
@@ -1466,6 +1468,9 @@ func (cfg *Config) validateQuota() error {
 	}
 	if cfg.QuotaThrottleMinFraction != 0 && (cfg.QuotaThrottleMinFraction <= 0 || cfg.QuotaThrottleMinFraction > 1) {
 		return fmt.Errorf("quota-throttle-min-fraction %v out of range (0,1]", cfg.QuotaThrottleMinFraction)
+	}
+	if cfg.QuotaThrottleBaseRate < 0 {
+		return fmt.Errorf("quota-throttle-base-rate %v must be >= 0", cfg.QuotaThrottleBaseRate)
 	}
 	return nil
 }

@@ -146,7 +146,11 @@ type ServerConfig struct {
 	// the permitted write-rate fraction (0,1] once a soft quota is reached.
 	QuotaThrottleSoftStart   float64
 	QuotaThrottleMinFraction float64
-	MaxTxnOps                uint
+	// QuotaThrottleBaseRate is the full-speed write rate (ops/sec) the throttle
+	// scales against in soft mode. 0 auto-measures it from un-throttled traffic;
+	// a positive value pins it for deterministic throttling.
+	QuotaThrottleBaseRate float64
+	MaxTxnOps             uint
 
 	// MaxRequestBytes is the maximum request size to send over raft.
 	MaxRequestBytes uint
