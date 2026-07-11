@@ -51,6 +51,23 @@ func (*passthroughQuota) Available(any) bool { return true }
 func (*passthroughQuota) Cost(any) int       { return 0 }
 func (*passthroughQuota) Remaining() int64   { return 1 }
 
+// QuotaMode selects how the backend quota behaves.
+type QuotaMode string
+
+const (
+	// QuotaModeHard is the historical behavior: --quota-backend-bytes is a hard
+	// ceiling on the backend's physical size; exceeding it raises the NOSPACE
+	// alarm and puts etcd in read-only mode. This is the default.
+	QuotaModeHard QuotaMode = "hard"
+	// QuotaModeSoft treats --quota-backend-bytes (physical) and
+	// --quota-logical-bytes (live keyspace) as soft quotas that throttle writes
+	// (see WriteThrottle), and moves the only hard stop to a real-disk backstop
+	// (DiskBackstop): NOSPACE is raised solely when the backend filesystem nears
+	// exhaustion, never on an engine's transient space amplification.
+	QuotaModeSoft QuotaMode = "soft"
+)
+
+// BackendQuota is the hard-mode quota: a ceiling on the backend's physical size.
 type BackendQuota struct {
 	be              backend.Backend
 	maxBackendBytes int64
@@ -71,7 +88,20 @@ var (
 	maxQuotaSize     = humanize.Bytes(uint64(MaxQuotaBytes))
 )
 
-// NewBackendQuota creates a quota layer with the given storage limit.
+// NewQuota builds the quota layer for the given mode. In hard mode it is a
+// physical-size ceiling on --quota-backend-bytes (NewBackendQuota). In soft mode
+// the hard stop is a real-disk backstop on the backend filesystem (diskPath),
+// keeping diskReserve bytes free; the soft --quota-backend-bytes /
+// --quota-logical-bytes limits only throttle (WriteThrottle), so they are not
+// consulted here.
+func NewQuota(mode QuotaMode, lg *zap.Logger, quotaBackendBytesCfg int64, be backend.Backend, name, diskPath string, diskReserve int64) Quota {
+	if mode == QuotaModeSoft {
+		return newDiskBackstopQuota(lg, be, name, diskPath, diskReserve)
+	}
+	return NewBackendQuota(lg, quotaBackendBytesCfg, be, name)
+}
+
+// NewBackendQuota creates a hard physical-size quota with the given storage limit.
 func NewBackendQuota(lg *zap.Logger, quotaBackendBytesCfg int64, be backend.Backend, name string) Quota {
 	quotaBackendBytes.Set(float64(quotaBackendBytesCfg))
 	if quotaBackendBytesCfg < 0 {
@@ -99,7 +129,7 @@ func NewBackendQuota(lg *zap.Logger, quotaBackendBytesCfg int64, be backend.Back
 			}
 		})
 		quotaBackendBytes.Set(float64(DefaultQuotaBytes))
-		return &BackendQuota{be, DefaultQuotaBytes}
+		return &BackendQuota{be: be, maxBackendBytes: DefaultQuotaBytes}
 	}
 
 	quotaLogOnce.Do(func() {
@@ -120,7 +150,7 @@ func NewBackendQuota(lg *zap.Logger, quotaBackendBytesCfg int64, be backend.Back
 			zap.String("quota-size", humanize.Bytes(uint64(quotaBackendBytesCfg))),
 		)
 	})
-	return &BackendQuota{be, quotaBackendBytesCfg}
+	return &BackendQuota{be: be, maxBackendBytes: quotaBackendBytesCfg}
 }
 
 func (b *BackendQuota) Available(v any) bool {
@@ -133,7 +163,56 @@ func (b *BackendQuota) Available(v any) bool {
 	return b.be.Size()+int64(cost) < b.maxBackendBytes
 }
 
-func (b *BackendQuota) Cost(v any) int {
+func (b *BackendQuota) Cost(v any) int { return requestCost(v) }
+
+// diskBackstopQuota is the soft-mode hard stop: it rejects writes (raising
+// NOSPACE) only when the backend filesystem would fall below its free-space
+// reserve. The soft byte limits throttle elsewhere; this never trips on an
+// engine's physical space amplification.
+type diskBackstopQuota struct {
+	backstop *DiskBackstop
+}
+
+func newDiskBackstopQuota(lg *zap.Logger, be backend.Backend, name, diskPath string, diskReserve int64) Quota {
+	if diskReserve < 0 {
+		quotaLogOnce.Do(func() {
+			lg.Info("disabled backend quota (soft mode, disk backstop off)",
+				zap.String("quota-name", name))
+		})
+		return &passthroughQuota{}
+	}
+	bs := NewDiskBackstop(diskPath, diskReserve)
+	quotaLogOnce.Do(func() {
+		if lg != nil {
+			lg.Info("enabled soft backend quota with disk backstop",
+				zap.String("quota-name", name),
+				zap.String("disk-path", diskPath),
+				zap.Int64("disk-reserve-bytes", bs.reserve),
+			)
+		}
+	})
+	return &diskBackstopQuota{backstop: bs}
+}
+
+func (q *diskBackstopQuota) Available(v any) bool {
+	cost := requestCost(v)
+	if cost == 0 {
+		return true
+	}
+	return q.backstop.Admits(int64(cost))
+}
+
+func (q *diskBackstopQuota) Cost(v any) int { return requestCost(v) }
+
+func (q *diskBackstopQuota) Remaining() int64 {
+	avail, ok := q.backstop.AvailableBytes()
+	if !ok {
+		return DefaultQuotaBytes
+	}
+	return avail - q.backstop.reserve
+}
+
+func requestCost(v any) int {
 	switch r := v.(type) {
 	case *pb.PutRequest:
 		return costPut(r)
