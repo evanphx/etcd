@@ -97,6 +97,9 @@ type ApplierOptions struct {
 	TxnModeWriteWithSharedBuffer bool
 	Backend                      backend.Backend
 	QuotaBackendBytesCfg         int64
+	QuotaMode                    string
+	QuotaBackendDiskPath         string
+	QuotaBackendDiskReserveBytes int64
 	WarningApplyDuration         time.Duration
 }
 

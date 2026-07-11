@@ -60,6 +60,7 @@ const (
 
 	DefaultName                        = "default"
 	DefaultBackendEngine               = "bbolt"
+	DefaultQuotaMode                   = "hard"
 	DefaultMaxSnapshots                = 5
 	DefaultMaxWALs                     = 5
 	DefaultMaxTxnOps                   = uint(128)
@@ -240,14 +241,19 @@ type Config struct {
 	BackendEngine string `json:"backend-engine"`
 	// Pebble-engine memory tuning (used only when backend-engine=pebble). Zero
 	// leaves Pebble's default in place. See the memory-tier tuning guidance.
-	PebbleCacheBytes                  int64 `json:"pebble-cache-bytes"`
-	PebbleMemTableBytes               int64 `json:"pebble-memtable-bytes"`
-	PebbleMemTableStopWritesThreshold int   `json:"pebble-memtable-count"`
-	PebbleMaxOpenFiles                int   `json:"pebble-max-open-files"`
-	PebbleMaxConcurrentCompactions    int   `json:"pebble-max-concurrent-compactions"`
-	QuotaBackendBytes                 int64 `json:"quota-backend-bytes"`
-	MaxTxnOps                         uint  `json:"max-txn-ops"`
-	MaxRequestBytes                   uint  `json:"max-request-bytes"`
+	PebbleCacheBytes                  int64   `json:"pebble-cache-bytes"`
+	PebbleMemTableBytes               int64   `json:"pebble-memtable-bytes"`
+	PebbleMemTableStopWritesThreshold int     `json:"pebble-memtable-count"`
+	PebbleMaxOpenFiles                int     `json:"pebble-max-open-files"`
+	PebbleMaxConcurrentCompactions    int     `json:"pebble-max-concurrent-compactions"`
+	QuotaBackendBytes                 int64   `json:"quota-backend-bytes"`
+	QuotaLogicalBytes                 int64   `json:"quota-logical-bytes"`
+	QuotaMode                         string  `json:"quota-mode"`
+	QuotaBackendDiskReserveBytes      int64   `json:"quota-backend-disk-reserve-bytes"`
+	QuotaThrottleSoftStart            float64 `json:"quota-throttle-soft-start"`
+	QuotaThrottleMinFraction          float64 `json:"quota-throttle-min-fraction"`
+	MaxTxnOps                         uint    `json:"max-txn-ops"`
+	MaxRequestBytes                   uint    `json:"max-request-bytes"`
 
 	// MaxConcurrentStreams specifies the maximum number of concurrent
 	// streams that each client can open at a time.
@@ -530,6 +536,7 @@ func NewConfig() *Config {
 		Name: DefaultName,
 
 		BackendEngine: DefaultBackendEngine,
+		QuotaMode:     DefaultQuotaMode,
 
 		SnapshotCount:          etcdserver.DefaultSnapshotCount,
 		SnapshotCatchUpEntries: etcdserver.DefaultSnapshotCatchUpEntries,
@@ -648,7 +655,12 @@ func (cfg *Config) AddFlags(fs *flag.FlagSet) {
 	fs.UintVar(&cfg.TickMs, "heartbeat-interval", cfg.TickMs, "Time (in milliseconds) of a heartbeat interval.")
 	fs.UintVar(&cfg.ElectionMs, "election-timeout", cfg.ElectionMs, "Time (in milliseconds) for an election to timeout.")
 	fs.BoolVar(&cfg.InitialElectionTickAdvance, "initial-election-tick-advance", cfg.InitialElectionTickAdvance, "Whether to fast-forward initial election ticks on boot for faster election.")
-	fs.Int64Var(&cfg.QuotaBackendBytes, "quota-backend-bytes", cfg.QuotaBackendBytes, "Sets the maximum size (in bytes) that the etcd backend database may consume. Exceeding this triggers an alarm and puts etcd in read-only mode. Set to 0 to use the default 2GiB limit.")
+	fs.Int64Var(&cfg.QuotaBackendBytes, "quota-backend-bytes", cfg.QuotaBackendBytes, "Sets the maximum size (in bytes) of the backend database. In the default --quota-mode=hard this is a hard ceiling on the physical size: exceeding it raises a NOSPACE alarm and puts etcd in read-only mode. In --quota-mode=soft it is instead a soft physical limit that throttles writes as it is approached (the hard stop moves to the disk backstop). Set to 0 to use the default 2GiB limit.")
+	fs.Int64Var(&cfg.QuotaLogicalBytes, "quota-logical-bytes", cfg.QuotaLogicalBytes, "Sets a soft logical quota (in bytes) on the live keyspace (sum of key+value bytes over live keys, excluding revision history and storage-engine slack). Only used in --quota-mode=soft: as live data approaches it, writes are throttled to govern smooth operation; it never triggers a read-only alarm. Set to 0 to disable.")
+	fs.StringVar(&cfg.QuotaMode, "quota-mode", cfg.QuotaMode, "Backend quota behavior: 'hard' (default) makes --quota-backend-bytes a hard physical-size ceiling that raises NOSPACE; 'soft' makes --quota-backend-bytes and --quota-logical-bytes soft limits that throttle writes, with the only hard stop being a real-disk backstop (see --quota-backend-disk-reserve-bytes).")
+	fs.Int64Var(&cfg.QuotaBackendDiskReserveBytes, "quota-backend-disk-reserve-bytes", cfg.QuotaBackendDiskReserveBytes, "In --quota-mode=soft, the free-space margin (in bytes) kept on the backend filesystem: writes hard-stop with NOSPACE once free disk would fall below it, so etcd fails read-only instead of crashing on ENOSPC. 0 uses the 100MiB default; negative disables the disk backstop.")
+	fs.Float64Var(&cfg.QuotaThrottleSoftStart, "quota-throttle-soft-start", cfg.QuotaThrottleSoftStart, "In --quota-mode=soft, the soft-quota utilization (fraction in (0,1)) at which write throttling begins; below it writes run at full speed. 0 uses the 0.80 default.")
+	fs.Float64Var(&cfg.QuotaThrottleMinFraction, "quota-throttle-min-fraction", cfg.QuotaThrottleMinFraction, "In --quota-mode=soft, the floor on the permitted write-rate fraction (in (0,1]) once a soft quota is reached; a soft quota throttles hard but never fully stops writes. 0 uses the 0.02 default.")
 	fs.StringVar(&cfg.BackendFreelistType, "backend-bbolt-freelist-type", cfg.BackendFreelistType, "BackendFreelistType specifies the type of freelist that boltdb backend uses(array and map are supported types)")
 	fs.StringVar(&cfg.BackendEngine, "backend-engine", cfg.BackendEngine, "BackendEngine selects the storage engine that backs the state machine (bbolt or pebble). Defaults to bbolt.")
 	fs.Int64Var(&cfg.PebbleCacheBytes, "pebble-cache-bytes", cfg.PebbleCacheBytes, "Pebble engine: block cache size in bytes (0 = Pebble default).")
@@ -969,6 +981,9 @@ func (cfg *Config) Validate() error {
 		return err
 	}
 	if err := cfg.validateBackendEngine(); err != nil {
+		return err
+	}
+	if err := cfg.validateQuota(); err != nil {
 		return err
 	}
 	if err := checkBindURLs(cfg.ListenPeerUrls); err != nil {
@@ -1437,4 +1452,20 @@ func (cfg *Config) validateBackendEngine() error {
 	default:
 		return fmt.Errorf("unknown backend-engine %q (supported: bbolt, pebble)", cfg.BackendEngine)
 	}
+}
+
+// validateQuota checks the quota-mode and soft-mode throttle-curve values.
+func (cfg *Config) validateQuota() error {
+	switch cfg.QuotaMode {
+	case "", DefaultQuotaMode, "soft":
+	default:
+		return fmt.Errorf("unknown quota-mode %q (supported: hard, soft)", cfg.QuotaMode)
+	}
+	if cfg.QuotaThrottleSoftStart != 0 && (cfg.QuotaThrottleSoftStart <= 0 || cfg.QuotaThrottleSoftStart >= 1) {
+		return fmt.Errorf("quota-throttle-soft-start %v out of range (0,1)", cfg.QuotaThrottleSoftStart)
+	}
+	if cfg.QuotaThrottleMinFraction != 0 && (cfg.QuotaThrottleMinFraction <= 0 || cfg.QuotaThrottleMinFraction > 1) {
+		return fmt.Errorf("quota-throttle-min-fraction %v out of range (0,1]", cfg.QuotaThrottleMinFraction)
+	}
+	return nil
 }

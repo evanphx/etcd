@@ -247,13 +247,18 @@ type EtcdServer struct {
 
 	applyWait wait.WaitTime
 
-	kv         mvcc.WatchableKV
-	lessor     lease.Lessor
-	bemu       sync.RWMutex
-	be         backend.Backend
-	beHooks    *serverstorage.BackendHooks
-	authStore  auth.AuthStore
-	alarmStore *v3alarm.AlarmStore
+	kv     mvcc.WatchableKV
+	lessor lease.Lessor
+	bemu   sync.RWMutex
+	be     backend.Backend
+
+	// writeThrottle applies soft-quota write backpressure; built lazily and
+	// shared across the KV and Lease servers. See WriteThrottle.
+	writeThrottleOnce sync.Once
+	writeThrottle     *serverstorage.WriteThrottle
+	beHooks           *serverstorage.BackendHooks
+	authStore         auth.AuthStore
+	alarmStore        *v3alarm.AlarmStore
 
 	stats  *stats.ServerStats
 	lstats *stats.LeaderStats
@@ -1165,6 +1170,9 @@ func (s *EtcdServer) NewUberApplier() apply.UberApplier {
 		TxnModeWriteWithSharedBuffer: s.Cfg.ServerFeatureGate.Enabled(features.TxnModeWriteWithSharedBuffer),
 		Backend:                      s.be,
 		QuotaBackendBytesCfg:         s.Cfg.QuotaBackendBytes,
+		QuotaMode:                    s.Cfg.QuotaMode,
+		QuotaBackendDiskPath:         s.Cfg.BackendPath(),
+		QuotaBackendDiskReserveBytes: s.Cfg.QuotaBackendDiskReserveBytes,
 		WarningApplyDuration:         s.Cfg.WarningApplyDuration,
 	}
 	return apply.NewUberApplier(opts)
@@ -2392,6 +2400,40 @@ func (s *EtcdServer) Backend() backend.Backend {
 	s.bemu.RLock()
 	defer s.bemu.RUnlock()
 	return s.be
+}
+
+// WriteThrottle returns the shared soft-quota write-backpressure controller,
+// building it on first use. --quota-backend-bytes is the soft physical (on-disk)
+// limit and --quota-logical-bytes the soft logical (live-keyspace) limit; as
+// either is approached, writes are throttled (never hard-stopped here — see the
+// physical NOSPACE backstop). Both quota servers share this one instance so the
+// aggregate write rate is what gets capped.
+func (s *EtcdServer) WriteThrottle() *serverstorage.WriteThrottle {
+	s.writeThrottleOnce.Do(func() {
+		physicalQuota, logicalQuota := int64(0), int64(0)
+		// The write throttle only operates in soft mode; hard mode leaves both
+		// signals at 0, so NewWriteThrottle is a no-op (see WriteThrottle.Wait).
+		if serverstorage.QuotaMode(s.Cfg.QuotaMode) == serverstorage.QuotaModeSoft {
+			physicalQuota = s.Cfg.QuotaBackendBytes
+			switch {
+			case physicalQuota == 0:
+				physicalQuota = serverstorage.DefaultQuotaBytes // 0 means the 2GiB default
+			case physicalQuota < 0:
+				physicalQuota = 0 // negative disables the physical signal
+			}
+			logicalQuota = s.Cfg.QuotaLogicalBytes
+			if logicalQuota < 0 {
+				logicalQuota = 0
+			}
+		}
+		params := serverstorage.NewThrottleParams(physicalQuota, logicalQuota,
+			s.Cfg.QuotaThrottleSoftStart, s.Cfg.QuotaThrottleMinFraction)
+		s.writeThrottle = serverstorage.NewWriteThrottle(params,
+			func() int64 { return s.Backend().Size() },
+			func() int64 { return s.KV().LogicalBytes() },
+		)
+	})
+	return s.writeThrottle
 }
 
 func (s *EtcdServer) AuthStore() auth.AuthStore { return s.authStore }

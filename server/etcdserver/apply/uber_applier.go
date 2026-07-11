@@ -62,7 +62,7 @@ func newApplierV3(opts ApplierOptions) applierV3 {
 	applierBackend := newApplierV3Backend(opts)
 	return newAuthApplierV3(
 		opts.AuthStore,
-		newQuotaApplierV3(opts.Logger, opts.QuotaBackendBytesCfg, opts.Backend, applierBackend),
+		newQuotaApplierV3(opts, opts.Backend, applierBackend),
 		opts.Lessor,
 	)
 }
