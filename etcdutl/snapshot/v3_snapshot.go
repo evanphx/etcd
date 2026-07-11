@@ -90,9 +90,12 @@ type v3Manager struct {
 	skipHashCheck   bool
 	initialMmapSize uint64
 
-	// engine is the storage engine of the snapshot, auto-detected from its
-	// format (a tar of a Pebble checkpoint vs a single bbolt file).
-	engine backend.Engine
+	// srcEngine is the storage engine of the snapshot, auto-detected from its
+	// format (a tar of a Pebble checkpoint vs a single bbolt file). engine is
+	// the target engine of the restored data dir; when they differ (only
+	// bbolt -> Pebble is supported) the snapshot is converted during restore.
+	srcEngine backend.Engine
+	engine    backend.Engine
 }
 
 // detectSnapshotEngine inspects a snapshot file and returns its storage engine.
@@ -342,6 +345,12 @@ type RestoreConfig struct {
 	// MarkCompacted is "true" to mark the latest revision as compacted.
 	// (required if RevisionBump > 0)
 	MarkCompacted bool
+
+	// BackendEngine is the target storage engine for the restored data dir
+	// ("bbolt" or "pebble"). Empty preserves the snapshot's own engine. A bbolt
+	// snapshot may be restored into "pebble" (converted during restore); the
+	// reverse (Pebble -> bbolt) is not supported.
+	BackendEngine string
 }
 
 // Restore restores a new etcd data directory from given snapshot file.
@@ -393,7 +402,20 @@ func (s *v3Manager) Restore(cfg RestoreConfig) error {
 	s.snapDir = filepath.Join(dataDir, "member", "snap")
 	s.skipHashCheck = cfg.SkipHashCheck
 	s.initialMmapSize = cfg.InitialMmapSize
-	s.engine = detectSnapshotEngine(s.srcDbPath)
+
+	s.srcEngine = detectSnapshotEngine(s.srcDbPath)
+	s.engine = s.srcEngine // default: preserve the snapshot's engine
+	if cfg.BackendEngine != "" {
+		s.engine = backend.Engine(cfg.BackendEngine)
+	}
+	switch s.engine {
+	case backend.EngineBBolt, backend.EnginePebble:
+	default:
+		return fmt.Errorf("unknown --backend-engine %q (supported: bbolt, pebble)", cfg.BackendEngine)
+	}
+	if s.srcEngine != s.engine && !(s.srcEngine == backend.EngineBBolt && s.engine == backend.EnginePebble) {
+		return fmt.Errorf("cannot restore a %s snapshot into the %s engine; only bbolt -> pebble conversion is supported", s.srcEngine, s.engine)
+	}
 
 	s.lg.Info(
 		"restoring snapshot",
@@ -593,13 +615,43 @@ func (s *v3Manager) copyAndVerifyDB() error {
 
 	// db hash is OK, can now modify DB so it can be part of a new cluster
 
-	// For pebble the verified artifact is a tar of a checkpoint directory;
-	// expand it into the store directory expected at outDbPath.
-	if s.engine == backend.EnginePebble {
+	switch {
+	case s.srcEngine == backend.EnginePebble:
+		// The verified artifact is a tar of a Pebble checkpoint; expand it into
+		// the store directory expected at outDbPath. (Target is Pebble.)
 		return s.expandPebbleSnapshot()
+	case s.engine == backend.EnginePebble:
+		// A bbolt snapshot restored into Pebble: convert the verified bbolt file
+		// at outDbPath into a Pebble store directory.
+		return s.convertBboltSnapshotToPebble()
+	default:
+		// bbolt snapshot into bbolt: the verified file is already the db.
+		return nil
 	}
+}
 
-	return nil
+// convertBboltSnapshotToPebble replaces the verified bbolt database file sitting
+// at outDbPath with a Pebble store directory holding the same logical content.
+func (s *v3Manager) convertBboltSnapshotToPebble() error {
+	outDbPath := s.outDbPath()
+	bboltPath := outDbPath + ".bbolt"
+	if err := os.Rename(outDbPath, bboltPath); err != nil {
+		return err
+	}
+	staging := outDbPath + ".stage"
+	if err := os.RemoveAll(staging); err != nil {
+		return err
+	}
+	if err := backend.ImportBboltIntoPebble(s.lg, bboltPath, staging); err != nil {
+		return fmt.Errorf("failed to convert bbolt snapshot into pebble: %w", err)
+	}
+	if err := os.RemoveAll(outDbPath); err != nil {
+		return err
+	}
+	if err := os.Rename(staging, outDbPath); err != nil {
+		return err
+	}
+	return os.Remove(bboltPath)
 }
 
 // expandPebbleSnapshot converts the verified Pebble snapshot tar sitting at
