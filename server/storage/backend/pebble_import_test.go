@@ -57,7 +57,7 @@ func TestExportPebbleToBbolt(t *testing.T) {
 	require.NoError(t, src.Close())
 
 	bboltPath := filepath.Join(dir, "out.db")
-	require.NoError(t, backend.ExportPebbleToBbolt(lg, pebbleDir, bboltPath, schema.AllBuckets))
+	require.NoError(t, backend.ExportPebbleToBbolt(lg, pebbleDir, bboltPath))
 
 	db, err := bolt.Open(bboltPath, 0o400, &bolt.Options{ReadOnly: true})
 	require.NoError(t, err)
@@ -106,7 +106,7 @@ func TestPebbleBboltPebbleRoundTrip(t *testing.T) {
 	require.NoError(t, src.Close())
 
 	bboltPath := filepath.Join(dir, "mid.db")
-	require.NoError(t, backend.ExportPebbleToBbolt(lg, p1, bboltPath, schema.AllBuckets))
+	require.NoError(t, backend.ExportPebbleToBbolt(lg, p1, bboltPath))
 
 	p2 := filepath.Join(dir, "p2")
 	require.NoError(t, backend.ImportBboltIntoPebble(lg, bboltPath, p2))
@@ -162,9 +162,6 @@ func TestImportBboltIntoPebbleRoundTrip(t *testing.T) {
 	// Convert bbolt -> Pebble.
 	pebbleDir := filepath.Join(dir, "pebble")
 	require.NoError(t, backend.ImportBboltIntoPebble(lg, bboltPath, pebbleDir))
-
-	// The converted artifact is a Pebble store directory, not a bbolt file.
-	require.False(t, backend.IsPebbleSnapshot(bboltPath), "source is a bbolt file")
 
 	// Open the converted store as Pebble and read everything back.
 	dst := backend.NewDefaultBackend(lg, pebbleDir, backend.WithEngine(backend.EnginePebble))

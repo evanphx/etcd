@@ -15,7 +15,6 @@
 package backend
 
 import (
-	"archive/tar"
 	"bytes"
 	"fmt"
 	"os"
@@ -43,23 +42,6 @@ func bucketByName(name []byte) (Bucket, bool) {
 		}
 	}
 	return nil, false
-}
-
-// IsPebbleSnapshot reports whether the file at path is a Pebble snapshot (a tar
-// whose first entry is the Pebble marker file), as opposed to a raw bbolt
-// database file. It is used to pick the right install/convert path for a
-// received or restored snapshot.
-func IsPebbleSnapshot(path string) bool {
-	f, err := os.Open(path)
-	if err != nil {
-		return false
-	}
-	defer f.Close()
-	h, err := tar.NewReader(f).Next()
-	if err != nil {
-		return false // not a tar (e.g. a bbolt file), so not a pebble snapshot
-	}
-	return h.Name == PebbleSnapshotVersionFile
 }
 
 // ImportBboltIntoPebble reads a bbolt database file (a db or a bbolt-format

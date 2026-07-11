@@ -17,6 +17,7 @@ package backend_test
 import (
 	"bytes"
 	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -228,9 +229,9 @@ func TestEngineCommitHook(t *testing.T) {
 	})
 }
 
-// TestPebbleSnapshotRoundTrip validates the Pebble snapshot format: a checkpoint
-// archived to a tar with an exact Size(), streamed out, extracted, and reopened
-// as a working backend with the original data intact.
+// TestPebbleSnapshotRoundTrip validates that a Pebble backend's snapshot is a
+// standard bbolt-format file with an exact Size(), and that importing it back
+// into a fresh Pebble store recovers the original data.
 func TestPebbleSnapshotRoundTrip(t *testing.T) {
 	be := newEngineBackend(t, backend.EnginePebble, filepath.Join(t.TempDir(), "db"))
 
@@ -253,12 +254,14 @@ func TestPebbleSnapshotRoundTrip(t *testing.T) {
 	require.NoError(t, snap.Close())
 	require.NoError(t, be.Close())
 
-	// Extract and reopen.
-	destDir := t.TempDir()
-	ckptDir, err := backend.UntarPebbleSnapshot(&buf, destDir)
-	require.NoError(t, err)
+	// The snapshot is a bbolt file; import it into a fresh Pebble store.
+	dir := t.TempDir()
+	snapFile := filepath.Join(dir, "snapshot.db")
+	require.NoError(t, os.WriteFile(snapFile, buf.Bytes(), 0o600))
+	pebbleDir := filepath.Join(dir, "restored")
+	require.NoError(t, backend.ImportBboltIntoPebble(nil, snapFile, pebbleDir))
 
-	be2 := newEngineBackend(t, backend.EnginePebble, ckptDir)
+	be2 := newEngineBackend(t, backend.EnginePebble, pebbleDir)
 	defer be2.Close()
 	rtx := be2.ReadTx()
 	rtx.RLock()
@@ -266,12 +269,6 @@ func TestPebbleSnapshotRoundTrip(t *testing.T) {
 	rtx.RUnlock()
 	require.Equal(t, [][]byte{[]byte("a"), []byte("b"), []byte("c")}, ks)
 	require.Equal(t, [][]byte{[]byte("v-a"), []byte("v-b"), []byte("v-c")}, vs)
-}
-
-// TestUntarPebbleSnapshotRejectsNonPebble ensures a non-Pebble stream is refused.
-func TestUntarPebbleSnapshotRejectsNonPebble(t *testing.T) {
-	_, err := backend.UntarPebbleSnapshot(bytes.NewReader([]byte("not a tar")), t.TempDir())
-	require.Error(t, err)
 }
 
 // TestPebbleHash verifies the Pebble whole-DB hash is deterministic, changes

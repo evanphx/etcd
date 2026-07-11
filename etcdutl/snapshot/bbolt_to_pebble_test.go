@@ -77,9 +77,6 @@ func TestRestoreBboltSnapshotIntoPebble(t *testing.T) {
 	lg := zaptest.NewLogger(t)
 	snapPath := saveBboltSnapshot(t, 10)
 
-	// The snapshot is a bbolt file.
-	require.Equal(t, backend.EngineBBolt, detectSnapshotEngine(snapPath))
-
 	outDir := filepath.Join(t.TempDir(), "restored")
 	err := NewV3(lg).Restore(RestoreConfig{
 		SnapshotPath:        snapPath,
@@ -117,7 +114,6 @@ func TestRestoreBboltSnapshotIntoPebble(t *testing.T) {
 func TestRestorePebbleSnapshotIntoBbolt(t *testing.T) {
 	lg := zaptest.NewLogger(t)
 	snapPath := savePebbleSnapshot(t, 10)
-	require.Equal(t, backend.EnginePebble, detectSnapshotEngine(snapPath))
 
 	outDir := filepath.Join(t.TempDir(), "restored")
 	err := NewV3(lg).Restore(RestoreConfig{

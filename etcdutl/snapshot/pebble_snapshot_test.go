@@ -71,13 +71,11 @@ func savePebbleSnapshot(t *testing.T, n int) string {
 	return snapPath
 }
 
-// TestPebbleSnapshotStatus verifies etcdutl snapshot status auto-detects a
-// Pebble snapshot and reports its contents.
+// TestPebbleSnapshotStatus verifies etcdutl snapshot status reads a snapshot
+// produced by a Pebble member (a standard bbolt-format file) and reports its
+// contents.
 func TestPebbleSnapshotStatus(t *testing.T) {
 	snapPath := savePebbleSnapshot(t, 10)
-
-	// The snapshot must be detected as pebble, not bbolt.
-	require.Equal(t, backend.EnginePebble, detectSnapshotEngine(snapPath))
 
 	st, err := NewV3(zaptest.NewLogger(t)).Status(snapPath)
 	require.NoError(t, err)
@@ -88,7 +86,8 @@ func TestPebbleSnapshotStatus(t *testing.T) {
 }
 
 // TestPebbleSnapshotRestore verifies etcdutl snapshot restore reconstructs a
-// data directory from a Pebble snapshot, and the restored store contains data.
+// Pebble data directory (--backend-engine=pebble) from a snapshot produced by a
+// Pebble member, and the restored store contains data.
 func TestPebbleSnapshotRestore(t *testing.T) {
 	lg := zaptest.NewLogger(t)
 	snapPath := savePebbleSnapshot(t, 10)
@@ -102,6 +101,7 @@ func TestPebbleSnapshotRestore(t *testing.T) {
 		InitialCluster:      "default=http://localhost:2380",
 		InitialClusterToken: "etcd-cluster",
 		SkipHashCheck:       false,
+		BackendEngine:       "pebble",
 	})
 	require.NoError(t, err)
 

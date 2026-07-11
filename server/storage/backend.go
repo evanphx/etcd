@@ -64,25 +64,17 @@ func newBackend(cfg config.ServerConfig, hooks backend.Hooks) backend.Backend {
 }
 
 // OpenSnapshotBackend installs a received snapshot db as the current etcd db and
-// opens it. For bbolt the snapshot artifact is a single file (renamed into
-// place); for pebble it is a tar of a checkpoint directory (extracted and
-// directory-swapped into place).
+// opens it. The snapshot artifact is a bbolt-format file regardless of the
+// sender's engine: a bbolt member renames it into place; a Pebble member
+// converts it into a Pebble store.
 func OpenSnapshotBackend(cfg config.ServerConfig, ss *snap.Snapshotter, snapshot *raftpb.Snapshot, hooks *BackendHooks) (backend.Backend, error) {
 	snapPath, err := ss.DBFilePath(snapshot.Metadata.GetIndex())
 	if err != nil {
 		return nil, fmt.Errorf("failed to find database snapshot file (%w)", err)
 	}
 	if backend.Engine(cfg.BackendEngine) == backend.EnginePebble {
-		// A Pebble member installs either a Pebble checkpoint tar (same-engine)
-		// or a bbolt-format snapshot (from a bbolt leader), converting the
-		// latter into a Pebble store. See installPebbleSnapshot.
-		if err := installPebbleSnapshot(cfg, snapPath); err != nil {
-			return nil, fmt.Errorf("failed to install pebble snapshot (%w)", err)
-		}
-	} else if backend.IsPebbleSnapshot(snapPath) {
-		// A bbolt member converts a received Pebble snapshot into a bbolt file.
-		if err := installBboltFromPebbleSnapshot(cfg, snapPath); err != nil {
-			return nil, fmt.Errorf("failed to convert pebble snapshot to bbolt (%w)", err)
+		if err := installPebbleFromBboltSnapshot(cfg, snapPath); err != nil {
+			return nil, fmt.Errorf("failed to install snapshot into pebble (%w)", err)
 		}
 	} else if err := os.Rename(snapPath, cfg.BackendPath()); err != nil {
 		return nil, fmt.Errorf("failed to rename database snapshot file (%w)", err)
@@ -90,106 +82,30 @@ func OpenSnapshotBackend(cfg config.ServerConfig, ss *snap.Snapshotter, snapshot
 	return OpenBackend(cfg, hooks), nil
 }
 
-// installPebbleSnapshot installs a received snapshot into a Pebble backend and
-// atomically swaps the resulting store directory into the backend path,
-// replacing any existing store. The snapshot may be a Pebble checkpoint tar
-// (same-engine, extracted) or a raw bbolt database file (from a bbolt leader,
-// converted into a Pebble store). The snapshot artifact is consumed on success
-// (mirroring the bbolt rename semantics).
-func installPebbleSnapshot(cfg config.ServerConfig, snapPath string) error {
+// installPebbleFromBboltSnapshot converts a received bbolt-format snapshot into
+// a Pebble store, atomically swapping it into the backend path and consuming the
+// snapshot artifact.
+func installPebbleFromBboltSnapshot(cfg config.ServerConfig, snapPath string) error {
 	bp := cfg.BackendPath()
 	staging := bp + ".snap.tmp"
 	if err := os.RemoveAll(staging); err != nil {
 		return err
 	}
-
-	// storeDir is the freshly-materialized Pebble store to swap into place.
-	var storeDir string
-	if backend.IsPebbleSnapshot(snapPath) {
-		if err := os.MkdirAll(staging, 0o700); err != nil {
-			return err
-		}
-		f, err := os.Open(snapPath)
-		if err != nil {
-			os.RemoveAll(staging)
-			return err
-		}
-		ckptDir, err := backend.UntarPebbleSnapshot(f, staging)
-		f.Close()
-		if err != nil {
-			os.RemoveAll(staging)
-			return err
-		}
-		storeDir = ckptDir
-	} else {
-		// A bbolt-format snapshot: convert it into a fresh Pebble store.
-		if err := backend.ImportBboltIntoPebble(cfg.Logger, snapPath, staging); err != nil {
-			os.RemoveAll(staging)
-			return fmt.Errorf("failed to convert bbolt snapshot into pebble: %w", err)
-		}
-		storeDir = staging
+	if err := backend.ImportBboltIntoPebble(cfg.Logger, snapPath, staging); err != nil {
+		os.RemoveAll(staging)
+		return fmt.Errorf("failed to convert bbolt snapshot into pebble: %w", err)
 	}
-
-	// Replace the live store directory with the materialized one.
 	if err := os.RemoveAll(bp); err != nil {
 		os.RemoveAll(staging)
 		return err
 	}
-	if err := os.Rename(storeDir, bp); err != nil {
+	if err := os.Rename(staging, bp); err != nil {
 		os.RemoveAll(staging)
-		return err
-	}
-	os.RemoveAll(staging)
-	os.Remove(snapPath) // consume the snapshot artifact
-
-	// fsync the parent directory so the rename is durable across a crash.
-	d, err := os.Open(filepath.Dir(bp))
-	if err != nil {
-		return err
-	}
-	defer d.Close()
-	return fileutil.Fsync(d)
-}
-
-// installBboltFromPebbleSnapshot converts a received Pebble snapshot (a
-// checkpoint tar) into a bbolt database file at the backend path: it extracts
-// the checkpoint to a temp Pebble store, exports it to a bbolt file with the
-// bboltfile codec, and atomically renames it into place.
-func installBboltFromPebbleSnapshot(cfg config.ServerConfig, snapPath string) error {
-	bp := cfg.BackendPath()
-	staging := bp + ".pebble.tmp"
-	if err := os.RemoveAll(staging); err != nil {
-		return err
-	}
-	if err := os.MkdirAll(staging, 0o700); err != nil {
-		return err
-	}
-	f, err := os.Open(snapPath)
-	if err != nil {
-		os.RemoveAll(staging)
-		return err
-	}
-	ckptDir, err := backend.UntarPebbleSnapshot(f, staging)
-	f.Close()
-	if err != nil {
-		os.RemoveAll(staging)
-		return err
-	}
-
-	tmpDB := bp + ".convert.tmp"
-	os.Remove(tmpDB)
-	if err := backend.ExportPebbleToBbolt(cfg.Logger, ckptDir, tmpDB, schema.AllBuckets); err != nil {
-		os.RemoveAll(staging)
-		os.Remove(tmpDB)
-		return err
-	}
-	os.RemoveAll(staging)
-	if err := os.Rename(tmpDB, bp); err != nil {
-		os.Remove(tmpDB)
 		return err
 	}
 	os.Remove(snapPath) // consume the snapshot artifact
 
+	// fsync the parent directory so the rename is durable across a crash.
 	d, err := os.Open(filepath.Dir(bp))
 	if err != nil {
 		return err
@@ -264,7 +180,7 @@ func convertDatabaseEngine(cfg config.ServerConfig, toBbolt bool) error {
 		return err
 	}
 	if toBbolt {
-		if err := backend.ExportPebbleToBbolt(cfg.Logger, bp, staging, schema.AllBuckets); err != nil {
+		if err := backend.ExportPebbleToBbolt(cfg.Logger, bp, staging); err != nil {
 			os.RemoveAll(staging)
 			return err
 		}

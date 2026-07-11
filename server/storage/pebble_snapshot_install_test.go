@@ -29,9 +29,9 @@ import (
 )
 
 // TestInstallPebbleSnapshot verifies the server-side snapshot install path:
-// a Pebble snapshot tar is extracted and directory-swapped into the backend
-// path, replacing any pre-existing store, and the installed store serves the
-// snapshot's data.
+// a received (bbolt-format) snapshot is converted into a Pebble store swapped
+// into the backend path, replacing any pre-existing store, and the installed
+// store serves the snapshot's data.
 func TestInstallPebbleSnapshot(t *testing.T) {
 	lg := zaptest.NewLogger(t)
 	dataDir := t.TempDir()
@@ -70,7 +70,7 @@ func TestInstallPebbleSnapshot(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(cfg.BackendPath(), "stale"), []byte("x"), 0o600))
 
 	// Install the snapshot.
-	require.NoError(t, installPebbleSnapshot(cfg, snapPath))
+	require.NoError(t, installPebbleFromBboltSnapshot(cfg, snapPath))
 	// The snapshot artifact is consumed.
 	assert.NoFileExists(t, snapPath)
 
