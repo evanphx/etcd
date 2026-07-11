@@ -80,9 +80,10 @@ func OpenSnapshotBackend(cfg config.ServerConfig, ss *snap.Snapshotter, snapshot
 			return nil, fmt.Errorf("failed to install pebble snapshot (%w)", err)
 		}
 	} else if backend.IsPebbleSnapshot(snapPath) {
-		// A bbolt member cannot install a Pebble snapshot; converting Pebble to
-		// bbolt is not supported.
-		return nil, fmt.Errorf("received a Pebble-format snapshot but this member runs the bbolt engine; cross-engine restore from Pebble to bbolt is not supported")
+		// A bbolt member converts a received Pebble snapshot into a bbolt file.
+		if err := installBboltFromPebbleSnapshot(cfg, snapPath); err != nil {
+			return nil, fmt.Errorf("failed to convert pebble snapshot to bbolt (%w)", err)
+		}
 	} else if err := os.Rename(snapPath, cfg.BackendPath()); err != nil {
 		return nil, fmt.Errorf("failed to rename database snapshot file (%w)", err)
 	}
@@ -142,6 +143,53 @@ func installPebbleSnapshot(cfg config.ServerConfig, snapPath string) error {
 	os.Remove(snapPath) // consume the snapshot artifact
 
 	// fsync the parent directory so the rename is durable across a crash.
+	d, err := os.Open(filepath.Dir(bp))
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return fileutil.Fsync(d)
+}
+
+// installBboltFromPebbleSnapshot converts a received Pebble snapshot (a
+// checkpoint tar) into a bbolt database file at the backend path: it extracts
+// the checkpoint to a temp Pebble store, exports it to a bbolt file with the
+// bboltfile codec, and atomically renames it into place.
+func installBboltFromPebbleSnapshot(cfg config.ServerConfig, snapPath string) error {
+	bp := cfg.BackendPath()
+	staging := bp + ".pebble.tmp"
+	if err := os.RemoveAll(staging); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(staging, 0o700); err != nil {
+		return err
+	}
+	f, err := os.Open(snapPath)
+	if err != nil {
+		os.RemoveAll(staging)
+		return err
+	}
+	ckptDir, err := backend.UntarPebbleSnapshot(f, staging)
+	f.Close()
+	if err != nil {
+		os.RemoveAll(staging)
+		return err
+	}
+
+	tmpDB := bp + ".convert.tmp"
+	os.Remove(tmpDB)
+	if err := backend.ExportPebbleToBbolt(cfg.Logger, ckptDir, tmpDB, schema.AllBuckets); err != nil {
+		os.RemoveAll(staging)
+		os.Remove(tmpDB)
+		return err
+	}
+	os.RemoveAll(staging)
+	if err := os.Rename(tmpDB, bp); err != nil {
+		os.Remove(tmpDB)
+		return err
+	}
+	os.Remove(snapPath) // consume the snapshot artifact
+
 	d, err := os.Open(filepath.Dir(bp))
 	if err != nil {
 		return err

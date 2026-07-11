@@ -21,8 +21,9 @@ import (
 	"os"
 
 	"github.com/cockroachdb/pebble/v2"
-	bolt "go.etcd.io/bbolt"
 	"go.uber.org/zap"
+
+	"go.etcd.io/etcd/server/v3/storage/backend/bboltfile"
 )
 
 // pebbleImportFlushBytes bounds how much converted data is buffered in a Pebble
@@ -68,10 +69,8 @@ func IsPebbleSnapshot(path string) bool {
 // store byte-identical logical content (including the meta/consistent_index
 // keys), the resulting Pebble store is an exact logical copy of the source.
 //
-// The source is opened read-only as a normal bbolt database. That mmaps the
-// file; for very large inputs a streaming bbolt page scanner would avoid the
-// mapping, but opening as a normal DB is the simplest correct reader and this
-// runs during a one-shot restore, not steady-state.
+// The source is read with the bboltfile codec (page-at-a-time, no mmap and no
+// bbolt library), streaming key/value pairs straight into batched Pebble writes.
 func ImportBboltIntoPebble(lg *zap.Logger, bboltPath, pebbleDir string) error {
 	if lg == nil {
 		lg = zap.NewNop()
@@ -80,7 +79,7 @@ func ImportBboltIntoPebble(lg *zap.Logger, bboltPath, pebbleDir string) error {
 		return fmt.Errorf("create pebble import dir: %w", err)
 	}
 
-	src, err := bolt.Open(bboltPath, 0o400, &bolt.Options{ReadOnly: true})
+	src, err := bboltfile.Open(bboltPath)
 	if err != nil {
 		return fmt.Errorf("open bbolt source %q: %w", bboltPath, err)
 	}
@@ -110,29 +109,22 @@ func ImportBboltIntoPebble(lg *zap.Logger, bboltPath, pebbleDir string) error {
 		return nil
 	}
 
-	err = src.View(func(tx *bolt.Tx) error {
-		return tx.ForEach(func(name []byte, b *bolt.Bucket) error {
-			bucket, ok := bucketByName(name)
-			if !ok {
-				return fmt.Errorf("bbolt source has unknown bucket %q; not a recognized etcd database", name)
-			}
-			return b.ForEach(func(k, v []byte) error {
-				if k == nil {
-					return nil // a nested-bucket entry; etcd uses none
-				}
-				// physKey copies k; pebble Batch.Set copies both key and value,
-				// so neither needs a separate copy despite bbolt's slice reuse.
-				if err := batch.Set(physKey(bucket, k), v, nil); err != nil {
-					return err
-				}
-				keys++
-				batchBytes += 1 + len(k) + len(v)
-				if batchBytes >= pebbleImportFlushBytes {
-					return flush()
-				}
-				return nil
-			})
-		})
+	err = src.ForEach(func(name, k, v []byte) error {
+		bucket, ok := bucketByName(name)
+		if !ok {
+			return fmt.Errorf("bbolt source has unknown bucket %q; not a recognized etcd database", name)
+		}
+		// physKey copies k; pebble Batch.Set copies both key and value, so
+		// neither needs a separate copy despite the reader's slice reuse.
+		if err := batch.Set(physKey(bucket, k), v, nil); err != nil {
+			return err
+		}
+		keys++
+		batchBytes += 1 + len(k) + len(v)
+		if batchBytes >= pebbleImportFlushBytes {
+			return flush()
+		}
+		return nil
 	})
 	if err != nil {
 		batch.Close()
