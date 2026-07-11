@@ -59,6 +59,13 @@ type pebbleSnapshotReader interface {
 // keeps the output free of buckets that merely happen to be registered. Memory
 // use is independent of database size.
 func exportPebbleSnapshot(lg *zap.Logger, snap pebbleSnapshotReader, bboltPath string) error {
+	// Refuse to write a lossy file: the export is registry-driven, so any data
+	// under an unregistered bucket prefix (or with an empty registry) would be
+	// silently dropped. Catch that up front.
+	if err := assertAllKeysRegistered(snap); err != nil {
+		return err
+	}
+
 	w, err := bboltfile.Create(bboltPath)
 	if err != nil {
 		return fmt.Errorf("create bbolt target %q: %w", bboltPath, err)
@@ -114,6 +121,46 @@ func exportPebbleSnapshot(lg *zap.Logger, snap pebbleSnapshotReader, bboltPath s
 		zap.Int("keys", keys),
 	)
 	return nil
+}
+
+// assertAllKeysRegistered errors if the Pebble store holds any key whose 1-byte
+// bucket-ID prefix is not a registered bucket — which the registry-driven export
+// would otherwise skip silently, dropping data. It scans distinct prefixes (one
+// seek per bucket), not every key, so the cost is negligible.
+func assertAllKeysRegistered(snap pebbleSnapshotReader) error {
+	registered := registeredPrefixSet()
+	iter, err := snap.NewIter(&pebble.IterOptions{})
+	if err != nil {
+		return err
+	}
+	defer iter.Close()
+	for valid := iter.First(); valid; {
+		k := iter.Key()
+		if len(k) == 0 { // not a bucket-prefixed key; shouldn't occur
+			valid = iter.Next()
+			continue
+		}
+		prefix := k[0]
+		if !registered[prefix] {
+			return fmt.Errorf("pebble export: store has data under unregistered bucket id %d; refusing to write a lossy bbolt file", prefix)
+		}
+		if prefix == 0xff {
+			break
+		}
+		valid = iter.SeekGE([]byte{prefix + 1}) // jump to the next bucket
+	}
+	return nil
+}
+
+// registeredPrefixSet returns the set of registered bucket-ID prefix bytes.
+func registeredPrefixSet() map[byte]bool {
+	bucketRegistryMu.RLock()
+	defer bucketRegistryMu.RUnlock()
+	set := make(map[byte]bool, len(bucketRegistry))
+	for id := range bucketRegistry {
+		set[id] = true
+	}
+	return set
 }
 
 // registeredBucketsByName returns the registered buckets ordered by name, as the

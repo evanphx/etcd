@@ -203,6 +203,29 @@ func TestImportBboltRejectsUnknownBucket(t *testing.T) {
 	require.ErrorContains(t, err, "unknown bucket")
 }
 
+// TestExportRejectsUnregisteredBucket ensures the export refuses to silently
+// drop data living under a bucket that is not registered.
+func TestExportRejectsUnregisteredBucket(t *testing.T) {
+	lg := zaptest.NewLogger(t)
+	dir := t.TempDir()
+	pebbleDir := filepath.Join(dir, "pebble")
+
+	src := backend.NewDefaultBackend(lg, pebbleDir, backend.WithEngine(backend.EnginePebble))
+	tx := src.BatchTx()
+	tx.Lock()
+	tx.UnsafeCreateBucket(schema.Key)
+	tx.UnsafePut(schema.Key, []byte("k"), []byte("v"))
+	// Data under an unregistered bucket id (250).
+	tx.UnsafeCreateBucket(unknownBucket{})
+	tx.UnsafePut(unknownBucket{}, []byte("x"), []byte("y"))
+	tx.Unlock()
+	src.ForceCommit()
+	require.NoError(t, src.Close())
+
+	err := backend.ExportPebbleToBbolt(lg, pebbleDir, filepath.Join(dir, "out.db"))
+	require.ErrorContains(t, err, "unregistered bucket id")
+}
+
 // unknownBucket is a bucket whose name is not registered in the schema.
 type unknownBucket struct{}
 
