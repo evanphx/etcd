@@ -73,47 +73,68 @@ func OpenSnapshotBackend(cfg config.ServerConfig, ss *snap.Snapshotter, snapshot
 		return nil, fmt.Errorf("failed to find database snapshot file (%w)", err)
 	}
 	if backend.Engine(cfg.BackendEngine) == backend.EnginePebble {
+		// A Pebble member installs either a Pebble checkpoint tar (same-engine)
+		// or a bbolt-format snapshot (from a bbolt leader), converting the
+		// latter into a Pebble store. See installPebbleSnapshot.
 		if err := installPebbleSnapshot(cfg, snapPath); err != nil {
 			return nil, fmt.Errorf("failed to install pebble snapshot (%w)", err)
 		}
+	} else if backend.IsPebbleSnapshot(snapPath) {
+		// A bbolt member cannot install a Pebble snapshot; converting Pebble to
+		// bbolt is not supported.
+		return nil, fmt.Errorf("received a Pebble-format snapshot but this member runs the bbolt engine; cross-engine restore from Pebble to bbolt is not supported")
 	} else if err := os.Rename(snapPath, cfg.BackendPath()); err != nil {
 		return nil, fmt.Errorf("failed to rename database snapshot file (%w)", err)
 	}
 	return OpenBackend(cfg, hooks), nil
 }
 
-// installPebbleSnapshot extracts a Pebble snapshot tar at snapPath and atomically
-// swaps the extracted store directory into the backend path, replacing any
-// existing store. The snapshot tar is consumed on success (mirroring the bbolt
-// rename semantics).
+// installPebbleSnapshot installs a received snapshot into a Pebble backend and
+// atomically swaps the resulting store directory into the backend path,
+// replacing any existing store. The snapshot may be a Pebble checkpoint tar
+// (same-engine, extracted) or a raw bbolt database file (from a bbolt leader,
+// converted into a Pebble store). The snapshot artifact is consumed on success
+// (mirroring the bbolt rename semantics).
 func installPebbleSnapshot(cfg config.ServerConfig, snapPath string) error {
 	bp := cfg.BackendPath()
 	staging := bp + ".snap.tmp"
 	if err := os.RemoveAll(staging); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(staging, 0o700); err != nil {
-		return err
+
+	// storeDir is the freshly-materialized Pebble store to swap into place.
+	var storeDir string
+	if backend.IsPebbleSnapshot(snapPath) {
+		if err := os.MkdirAll(staging, 0o700); err != nil {
+			return err
+		}
+		f, err := os.Open(snapPath)
+		if err != nil {
+			os.RemoveAll(staging)
+			return err
+		}
+		ckptDir, err := backend.UntarPebbleSnapshot(f, staging)
+		f.Close()
+		if err != nil {
+			os.RemoveAll(staging)
+			return err
+		}
+		storeDir = ckptDir
+	} else {
+		// A bbolt-format snapshot: convert it into a fresh Pebble store.
+		if err := backend.ImportBboltIntoPebble(cfg.Logger, snapPath, staging); err != nil {
+			os.RemoveAll(staging)
+			return fmt.Errorf("failed to convert bbolt snapshot into pebble: %w", err)
+		}
+		storeDir = staging
 	}
 
-	f, err := os.Open(snapPath)
-	if err != nil {
-		os.RemoveAll(staging)
-		return err
-	}
-	ckptDir, err := backend.UntarPebbleSnapshot(f, staging)
-	f.Close()
-	if err != nil {
-		os.RemoveAll(staging)
-		return err
-	}
-
-	// Replace the live store directory with the extracted checkpoint.
+	// Replace the live store directory with the materialized one.
 	if err := os.RemoveAll(bp); err != nil {
 		os.RemoveAll(staging)
 		return err
 	}
-	if err := os.Rename(ckptDir, bp); err != nil {
+	if err := os.Rename(storeDir, bp); err != nil {
 		os.RemoveAll(staging)
 		return err
 	}
