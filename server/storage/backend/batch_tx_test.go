@@ -156,6 +156,9 @@ func TestBatchTxDelete(t *testing.T) {
 }
 
 func TestBatchTxCommit(t *testing.T) {
+	if betesting.CurrentTestEngine() == backend.EnginePebble {
+		t.Skip("inspects the raw bolt DB via DbFromBackendForTest; bbolt-only")
+	}
 	b, _ := betesting.NewTmpBackend(t, time.Hour, 10000)
 	defer betesting.Close(t, b)
 
@@ -183,6 +186,9 @@ func TestBatchTxCommit(t *testing.T) {
 }
 
 func TestBatchTxBatchLimitCommit(t *testing.T) {
+	if betesting.CurrentTestEngine() == backend.EnginePebble {
+		t.Skip("inspects the raw bolt DB via DbFromBackendForTest; bbolt-only")
+	}
 	// start backend with batch limit 1 so one write can
 	// trigger a commit
 	b, _ := betesting.NewTmpBackend(t, time.Hour, 1)

@@ -17,10 +17,12 @@ package storage
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"go.uber.org/zap"
 
+	"go.etcd.io/etcd/client/pkg/v3/fileutil"
 	"go.etcd.io/etcd/server/v3/config"
 	"go.etcd.io/etcd/server/v3/etcdserver/api/snap"
 	"go.etcd.io/etcd/server/v3/storage/backend"
@@ -45,6 +47,12 @@ func newBackend(cfg config.ServerConfig, hooks backend.Hooks) backend.Backend {
 		}
 	}
 	bcfg.BackendFreelistType = cfg.BackendFreelistType
+	bcfg.Engine = backend.Engine(cfg.BackendEngine)
+	bcfg.PebbleCacheBytes = cfg.PebbleCacheBytes
+	bcfg.PebbleMemTableBytes = cfg.PebbleMemTableBytes
+	bcfg.PebbleMemTableStopWritesThreshold = cfg.PebbleMemTableStopWritesThreshold
+	bcfg.PebbleMaxOpenFiles = cfg.PebbleMaxOpenFiles
+	bcfg.PebbleMaxConcurrentCompactions = cfg.PebbleMaxConcurrentCompactions
 	bcfg.Logger = cfg.Logger
 	if cfg.QuotaBackendBytes > 0 && cfg.QuotaBackendBytes != DefaultQuotaBytes {
 		// permit 10% excess over quota for disarm
@@ -55,16 +63,55 @@ func newBackend(cfg config.ServerConfig, hooks backend.Hooks) backend.Backend {
 	return backend.New(bcfg)
 }
 
-// OpenSnapshotBackend renames a snapshot db to the current etcd db and opens it.
+// OpenSnapshotBackend installs a received snapshot db as the current etcd db and
+// opens it. The snapshot artifact is a bbolt-format file regardless of the
+// sender's engine: a bbolt member renames it into place; a Pebble member
+// converts it into a Pebble store.
 func OpenSnapshotBackend(cfg config.ServerConfig, ss *snap.Snapshotter, snapshot *raftpb.Snapshot, hooks *BackendHooks) (backend.Backend, error) {
 	snapPath, err := ss.DBFilePath(snapshot.Metadata.GetIndex())
 	if err != nil {
 		return nil, fmt.Errorf("failed to find database snapshot file (%w)", err)
 	}
-	if err := os.Rename(snapPath, cfg.BackendPath()); err != nil {
+	if backend.Engine(cfg.BackendEngine) == backend.EnginePebble {
+		if err := installPebbleFromBboltSnapshot(cfg, snapPath); err != nil {
+			return nil, fmt.Errorf("failed to install snapshot into pebble (%w)", err)
+		}
+	} else if err := os.Rename(snapPath, cfg.BackendPath()); err != nil {
 		return nil, fmt.Errorf("failed to rename database snapshot file (%w)", err)
 	}
 	return OpenBackend(cfg, hooks), nil
+}
+
+// installPebbleFromBboltSnapshot converts a received bbolt-format snapshot into
+// a Pebble store, atomically swapping it into the backend path and consuming the
+// snapshot artifact.
+func installPebbleFromBboltSnapshot(cfg config.ServerConfig, snapPath string) error {
+	bp := cfg.BackendPath()
+	staging := bp + ".snap.tmp"
+	if err := os.RemoveAll(staging); err != nil {
+		return err
+	}
+	if err := backend.ImportBboltIntoPebble(cfg.Logger, snapPath, staging); err != nil {
+		os.RemoveAll(staging)
+		return fmt.Errorf("failed to convert bbolt snapshot into pebble: %w", err)
+	}
+	if err := os.RemoveAll(bp); err != nil {
+		os.RemoveAll(staging)
+		return err
+	}
+	if err := os.Rename(staging, bp); err != nil {
+		os.RemoveAll(staging)
+		return err
+	}
+	os.Remove(snapPath) // consume the snapshot artifact
+
+	// fsync the parent directory so the rename is durable across a crash.
+	d, err := os.Open(filepath.Dir(bp))
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return fileutil.Fsync(d)
 }
 
 // OpenBackend returns a backend using the current etcd db.

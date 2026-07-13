@@ -68,7 +68,7 @@ func TestVersion(t *testing.T) {
 			be.ForceCommit()
 			be.Close()
 
-			b := backend.NewDefaultBackend(lg, tmpPath)
+			b := backend.NewDefaultBackend(lg, tmpPath, betesting.EngineOptFromEnv())
 			defer b.Close()
 			v := UnsafeReadStorageVersion(b.BatchTx())
 
@@ -79,6 +79,9 @@ func TestVersion(t *testing.T) {
 
 // TestVersionSnapshot ensures that UnsafeSetStorageVersion/unsafeReadStorageVersionFromSnapshot work well together.
 func TestVersionSnapshot(t *testing.T) {
+	if betesting.CurrentTestEngine() == backend.EnginePebble {
+		t.Skip("reads the snapshot as a bbolt file via ReadStorageVersionFromSnapshot; bbolt-only")
+	}
 	tcs := []struct {
 		version       string
 		expectVersion string
