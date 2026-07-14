@@ -114,8 +114,150 @@ func installPebbleFromBboltSnapshot(cfg config.ServerConfig, snapPath string) er
 	return fileutil.Fsync(d)
 }
 
+// maybeConvertBackendEngine converts an existing database in place when its
+// on-disk format does not match --backend-engine, so an operator can switch
+// engines by only changing the flag. bbolt databases are single files; Pebble
+// stores are directories, which is how the current format is detected. It is a
+// no-op for a fresh member or when the format already matches.
+func maybeConvertBackendEngine(cfg config.ServerConfig) error {
+	bp := cfg.BackendPath()
+	info, err := os.Stat(bp)
+	if os.IsNotExist(err) {
+		return nil // fresh member
+	}
+	if err != nil {
+		return err
+	}
+	wantPebble := backend.Engine(cfg.BackendEngine) == backend.EnginePebble
+	isPebble := info.IsDir()
+	if wantPebble == isPebble {
+		return nil // already in the configured format
+	}
+
+	toBbolt := !wantPebble
+	cfg.Logger.Info("converting existing database to the configured backend engine",
+		zap.String("from", engineName(isPebble)),
+		zap.String("to", cfg.BackendEngine),
+		zap.String("path", bp))
+	start := time.Now()
+	if err := convertDatabaseEngine(cfg, toBbolt); err != nil {
+		return err
+	}
+	cfg.Logger.Info("converted existing database to the configured backend engine",
+		zap.String("to", cfg.BackendEngine),
+		zap.Duration("took", time.Since(start)))
+	return nil
+}
+
+func engineName(isDir bool) string {
+	if isDir {
+		return string(backend.EnginePebble)
+	}
+	return string(backend.EngineBBolt)
+}
+
+// convertDatabaseEngine rebuilds the database at the backend path in the other
+// engine's format. It builds the new store beside the original (leaving the
+// original untouched during the build), then swaps: move the original aside,
+// install the new store, delete the original. A crash during the swap is
+// recovered on the next start via the leftover backup.
+func convertDatabaseEngine(cfg config.ServerConfig, toBbolt bool) error {
+	bp := cfg.BackendPath()
+	staging := bp + ".engineconv"
+	backup := bp + ".preconv"
+
+	// Recover from a crash during a previous swap (original moved to backup).
+	if fileutil.Exist(backup) {
+		if err := finishConversionSwap(bp, staging, backup); err != nil {
+			return err
+		}
+		if !conversionNeeded(bp, toBbolt) {
+			return nil
+		}
+	}
+
+	if err := os.RemoveAll(staging); err != nil {
+		return err
+	}
+	if toBbolt {
+		if err := backend.ExportPebbleToBbolt(cfg.Logger, bp, staging); err != nil {
+			os.RemoveAll(staging)
+			return err
+		}
+	} else {
+		if err := backend.ImportBboltIntoPebble(cfg.Logger, bp, staging); err != nil {
+			os.RemoveAll(staging)
+			return err
+		}
+	}
+
+	// Swap. Each rename is atomic; the only crash window is between the two,
+	// which finishConversionSwap recovers.
+	if err := os.Rename(bp, backup); err != nil {
+		os.RemoveAll(staging)
+		return err
+	}
+	if err := os.Rename(staging, bp); err != nil {
+		os.Rename(backup, bp) // best-effort restore of the original
+		return err
+	}
+	if err := os.RemoveAll(backup); err != nil {
+		return err
+	}
+	return fsyncDir(filepath.Dir(bp))
+}
+
+// finishConversionSwap completes an interrupted swap, given that the original
+// database still exists at backup.
+func finishConversionSwap(bp, staging, backup string) error {
+	switch {
+	case fileutil.Exist(bp):
+		// The new store is already installed at bp; drop the leftover backup.
+		return os.RemoveAll(backup)
+	case fileutil.Exist(staging):
+		// The new store was built but not yet installed; install it.
+		if err := os.Rename(staging, bp); err != nil {
+			return err
+		}
+		return os.RemoveAll(backup)
+	default:
+		// Only the original remains; restore it and let conversion retry.
+		return os.Rename(backup, bp)
+	}
+}
+
+// conversionNeeded reports whether the db at bp is still in the source format.
+func conversionNeeded(bp string, toBbolt bool) bool {
+	info, err := os.Stat(bp)
+	if err != nil {
+		return false
+	}
+	if toBbolt {
+		return info.IsDir() // still a Pebble store
+	}
+	return !info.IsDir() // still a bbolt file
+}
+
+func fsyncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return fileutil.Fsync(d)
+}
+
 // OpenBackend returns a backend using the current etcd db.
 func OpenBackend(cfg config.ServerConfig, hooks backend.Hooks) backend.Backend {
+	// If an existing database is in the other engine's format, convert it in
+	// place so an operator can switch engines by just changing --backend-engine.
+	if err := maybeConvertBackendEngine(cfg); err != nil {
+		cfg.Logger.Panic("failed to convert the existing database to the configured backend engine",
+			zap.String("backend-engine", cfg.BackendEngine),
+			zap.String("path", cfg.BackendPath()),
+			zap.Error(err))
+	}
+
 	fn := cfg.BackendPath()
 
 	now, beOpened := time.Now(), make(chan backend.Backend)
