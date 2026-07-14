@@ -122,7 +122,23 @@ type ServerConfig struct {
 	CompactionBatchLimit    int
 	CompactionSleepInterval time.Duration
 	QuotaBackendBytes       int64
-	MaxTxnOps               uint
+	QuotaLogicalBytes       int64
+	// QuotaMode selects hard (default) or soft backend-quota behavior. See
+	// storage.QuotaMode.
+	QuotaMode string
+	// QuotaBackendDiskReserveBytes is the free-disk margin the soft-mode disk
+	// backstop keeps on the backend filesystem (0 = default, <0 = disabled).
+	QuotaBackendDiskReserveBytes int64
+	// QuotaThrottleSoftStart is the soft-mode utilization (0,1) at which write
+	// throttling begins (0 = default). QuotaThrottleMinFraction is the floor on
+	// the permitted write-rate fraction (0,1] once a soft quota is reached.
+	QuotaThrottleSoftStart   float64
+	QuotaThrottleMinFraction float64
+	// QuotaThrottleBaseRate is the full-speed write rate (ops/sec) the throttle
+	// scales against in soft mode. 0 auto-measures it from un-throttled traffic;
+	// a positive value pins it for deterministic throttling.
+	QuotaThrottleBaseRate float64
+	MaxTxnOps             uint
 
 	// MaxRequestBytes is the maximum request size to send over raft.
 	MaxRequestBytes uint

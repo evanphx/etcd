@@ -26,7 +26,8 @@ import (
 
 type quotaKVServer struct {
 	pb.KVServer
-	qa quotaAlarmer
+	qa       quotaAlarmer
+	throttle *storage.WriteThrottle
 }
 
 type quotaAlarmer struct {
@@ -54,11 +55,15 @@ func NewQuotaKVServer(s *etcdserver.EtcdServer) pb.KVServer {
 	return &quotaKVServer{
 		NewKVServer(s),
 		quotaAlarmer{newBackendQuota(s, "kv"), s, s.MemberID()},
+		s.WriteThrottle(),
 	}
 }
 
 func (s *quotaKVServer) Put(ctx context.Context, r *pb.PutRequest) (*pb.PutResponse, error) {
 	if err := s.qa.check(ctx, r); err != nil {
+		return nil, err
+	}
+	if err := s.throttle.Wait(ctx); err != nil {
 		return nil, err
 	}
 	return s.KVServer.Put(ctx, r)
@@ -68,16 +73,23 @@ func (s *quotaKVServer) Txn(ctx context.Context, r *pb.TxnRequest) (*pb.TxnRespo
 	if err := s.qa.check(ctx, r); err != nil {
 		return nil, err
 	}
+	if err := s.throttle.Wait(ctx); err != nil {
+		return nil, err
+	}
 	return s.KVServer.Txn(ctx, r)
 }
 
 type quotaLeaseServer struct {
 	pb.LeaseServer
-	qa quotaAlarmer
+	qa       quotaAlarmer
+	throttle *storage.WriteThrottle
 }
 
 func (s *quotaLeaseServer) LeaseGrant(ctx context.Context, cr *pb.LeaseGrantRequest) (*pb.LeaseGrantResponse, error) {
 	if err := s.qa.check(ctx, cr); err != nil {
+		return nil, err
+	}
+	if err := s.throttle.Wait(ctx); err != nil {
 		return nil, err
 	}
 	return s.LeaseServer.LeaseGrant(ctx, cr)
@@ -87,9 +99,17 @@ func NewQuotaLeaseServer(s *etcdserver.EtcdServer) pb.LeaseServer {
 	return &quotaLeaseServer{
 		NewLeaseServer(s),
 		quotaAlarmer{newBackendQuota(s, "lease"), s, s.MemberID()},
+		s.WriteThrottle(),
 	}
 }
 
 func newBackendQuota(s *etcdserver.EtcdServer, name string) storage.Quota {
-	return storage.NewBackendQuota(s.Logger(), s.Cfg.QuotaBackendBytes, s.Backend(), name)
+	// hard mode (default): --quota-backend-bytes is a physical-size ceiling that
+	// raises NOSPACE. soft mode: the byte limits only throttle (see
+	// EtcdServer.WriteThrottle) and the hard stop is the real-disk backstop.
+	return storage.NewQuota(
+		storage.QuotaMode(s.Cfg.QuotaMode),
+		s.Logger(), s.Cfg.QuotaBackendBytes, s.Backend(), name,
+		s.Cfg.BackendPath(), s.Cfg.QuotaBackendDiskReserveBytes,
+	)
 }

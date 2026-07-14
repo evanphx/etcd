@@ -15,8 +15,6 @@
 package apply
 
 import (
-	"go.uber.org/zap"
-
 	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/pkg/v3/traceutil"
 	"go.etcd.io/etcd/server/v3/etcdserver/errors"
@@ -29,8 +27,15 @@ type quotaApplierV3 struct {
 	q serverstorage.Quota
 }
 
-func newQuotaApplierV3(lg *zap.Logger, quotaBackendBytesCfg int64, be backend.Backend, app applierV3) applierV3 {
-	return &quotaApplierV3{app, serverstorage.NewBackendQuota(lg, quotaBackendBytesCfg, be, "v3-applier")}
+func newQuotaApplierV3(opts ApplierOptions, be backend.Backend, app applierV3) applierV3 {
+	// hard mode: physical-size ceiling → NOSPACE. soft mode: real-disk backstop
+	// is the only hard stop; the soft byte limits throttle at the RPC layer.
+	q := serverstorage.NewQuota(
+		serverstorage.QuotaMode(opts.QuotaMode),
+		opts.Logger, opts.QuotaBackendBytesCfg, be, "v3-applier",
+		opts.QuotaBackendDiskPath, opts.QuotaBackendDiskReserveBytes,
+	)
+	return &quotaApplierV3{app, q}
 }
 
 func (a *quotaApplierV3) Put(p *pb.PutRequest) (*pb.PutResponse, *traceutil.Trace, error) {
