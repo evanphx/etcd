@@ -88,6 +88,17 @@ type v3Manager struct {
 
 	skipHashCheck   bool
 	initialMmapSize uint64
+
+	// engine is the target storage engine of the restored data dir. Snapshots
+	// are always bbolt-format; when the target is Pebble the snapshot is
+	// converted during restore.
+	engine backend.Engine
+}
+
+// openBackend opens the restored backend with the target engine.
+func (s *v3Manager) openBackend(opts ...backend.BackendConfigOption) backend.Backend {
+	opts = append(opts, backend.WithEngine(s.engine))
+	return backend.NewDefaultBackend(s.lg, s.outDbPath(), opts...)
 }
 
 // hasChecksum returns "true" if the file size "n"
@@ -251,6 +262,12 @@ type RestoreConfig struct {
 	// MarkCompacted is "true" to mark the latest revision as compacted.
 	// (required if RevisionBump > 0)
 	MarkCompacted bool
+
+	// BackendEngine is the target storage engine for the restored data dir
+	// ("bbolt" or "pebble"). Empty preserves the snapshot's own engine. A bbolt
+	// snapshot may be restored into "pebble" (converted during restore); the
+	// reverse (Pebble -> bbolt) is not supported.
+	BackendEngine string
 }
 
 // Restore restores a new etcd data directory from given snapshot file.
@@ -302,6 +319,18 @@ func (s *v3Manager) Restore(cfg RestoreConfig) error {
 	s.snapDir = filepath.Join(dataDir, "member", "snap")
 	s.skipHashCheck = cfg.SkipHashCheck
 	s.initialMmapSize = cfg.InitialMmapSize
+
+	// Snapshots are always bbolt-format; --backend-engine selects the restored
+	// data dir's engine (default bbolt), converting during restore if Pebble.
+	s.engine = backend.EngineBBolt
+	if cfg.BackendEngine != "" {
+		s.engine = backend.Engine(cfg.BackendEngine)
+	}
+	switch s.engine {
+	case backend.EngineBBolt, backend.EnginePebble:
+	default:
+		return fmt.Errorf("unknown --backend-engine %q (supported: bbolt, pebble)", cfg.BackendEngine)
+	}
 
 	s.lg.Info(
 		"restoring snapshot",
@@ -358,7 +387,7 @@ func (s *v3Manager) saveDB() error {
 		return err
 	}
 
-	be := backend.NewDefaultBackend(s.lg, s.outDbPath(), backend.WithMmapSize(s.initialMmapSize))
+	be := s.openBackend(backend.WithMmapSize(s.initialMmapSize))
 	defer be.Close()
 
 	err = schema.NewMembershipBackend(s.lg, be).TrimMembershipFromBackend()
@@ -372,7 +401,7 @@ func (s *v3Manager) saveDB() error {
 // modifyLatestRevision can increase the latest revision by the given amount and sets the scheduled compaction
 // to that revision so that the server will consider this revision compacted.
 func (s *v3Manager) modifyLatestRevision(bumpAmount uint64) error {
-	be := backend.NewDefaultBackend(s.lg, s.outDbPath())
+	be := s.openBackend()
 	defer func() {
 		be.ForceCommit()
 		be.Close()
@@ -501,7 +530,36 @@ func (s *v3Manager) copyAndVerifyDB() error {
 
 	// db hash is OK, can now modify DB so it can be part of a new cluster
 
+	// The verified artifact is a bbolt file. If the target engine is Pebble,
+	// convert it into a Pebble store; otherwise it is already the db.
+	if s.engine == backend.EnginePebble {
+		return s.convertBboltSnapshotToPebble()
+	}
 	return nil
+}
+
+// convertBboltSnapshotToPebble replaces the verified bbolt database file sitting
+// at outDbPath with a Pebble store directory holding the same logical content.
+func (s *v3Manager) convertBboltSnapshotToPebble() error {
+	outDbPath := s.outDbPath()
+	bboltPath := outDbPath + ".bbolt"
+	if err := os.Rename(outDbPath, bboltPath); err != nil {
+		return err
+	}
+	staging := outDbPath + ".stage"
+	if err := os.RemoveAll(staging); err != nil {
+		return err
+	}
+	if err := backend.ImportBboltIntoPebble(s.lg, bboltPath, staging); err != nil {
+		return fmt.Errorf("failed to convert bbolt snapshot into pebble: %w", err)
+	}
+	if err := os.RemoveAll(outDbPath); err != nil {
+		return err
+	}
+	if err := os.Rename(staging, outDbPath); err != nil {
+		return err
+	}
+	return os.Remove(bboltPath)
 }
 
 // saveWALAndSnap creates a WAL for the initial cluster
@@ -513,7 +571,7 @@ func (s *v3Manager) saveWALAndSnap() (*raftpb.HardState, error) {
 	}
 
 	// add members again to persist them to the backend we create.
-	be := backend.NewDefaultBackend(s.lg, s.outDbPath(), backend.WithMmapSize(s.initialMmapSize))
+	be := s.openBackend(backend.WithMmapSize(s.initialMmapSize))
 	defer be.Close()
 	s.cl.SetBackend(schema.NewMembershipBackend(s.lg, be))
 	for _, m := range s.cl.Members() {
@@ -592,7 +650,7 @@ func (s *v3Manager) saveWALAndSnap() (*raftpb.HardState, error) {
 }
 
 func (s *v3Manager) updateCIndex(commit uint64, term uint64) error {
-	be := backend.NewDefaultBackend(s.lg, s.outDbPath(), backend.WithMmapSize(s.initialMmapSize))
+	be := s.openBackend(backend.WithMmapSize(s.initialMmapSize))
 	defer be.Close()
 
 	cindex.UpdateConsistentIndexForce(be.BatchTx(), commit, term)
